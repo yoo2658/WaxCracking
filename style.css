@@ -29,6 +29,7 @@ html, body {
   top: 20px;
   right: 20px;
   width: 260px;
+  max-width: calc(100vw - 40px);
   padding: 18px;
   border-radius: 16px;
   background: rgba(20, 22, 28, 0.72);
@@ -37,11 +38,43 @@ html, body {
   user-select: none;
 }
 
+.ui-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 #ui h1 {
-  margin: 0 0 14px;
+  margin: 0;
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.02em;
+}
+
+#ui-toggle {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: #eef0f4;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#ui-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#ui-body {
+  margin-top: 14px;
+}
+
+#ui.collapsed #ui-body {
+  display: none;
 }
 
 #ui section {

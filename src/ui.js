@@ -44,5 +44,15 @@ export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhoto
 
   resetButton.addEventListener('click', onReset);
 
+  // The panel covers a lot of a phone-sized screen, blocking taps on the wax
+  // underneath it — let it collapse down to just this header/toggle so the
+  // rest of the screen is free.
+  const uiPanel = document.getElementById('ui');
+  const uiToggle = document.getElementById('ui-toggle');
+  uiToggle.addEventListener('click', () => {
+    const collapsed = uiPanel.classList.toggle('collapsed');
+    uiToggle.textContent = collapsed ? '☰' : '✕';
+  });
+
   return { initialColor: colorPicker.value };
 }

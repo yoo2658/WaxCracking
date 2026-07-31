@@ -31880,6 +31880,12 @@ diffuseColor.rgb = coreSample.rgb;
       onColorChange(colorPicker.value);
     });
     resetButton.addEventListener("click", onReset);
+    const uiPanel = document.getElementById("ui");
+    const uiToggle = document.getElementById("ui-toggle");
+    uiToggle.addEventListener("click", () => {
+      const collapsed = uiPanel.classList.toggle("collapsed");
+      uiToggle.textContent = collapsed ? "\u2630" : "\u2715";
+    });
     return { initialColor: colorPicker.value };
   }
 
