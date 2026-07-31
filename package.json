@@ -1,0 +1,16 @@
+{
+  "name": "wax-cracking",
+  "version": "0.1.0",
+  "private": true,
+  "description": "서버 없이 로컬 PC에서 동작하는 왁스 부수기 미니게임",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --format=iife --outfile=dist/bundle.js",
+    "watch": "esbuild src/main.js --bundle --format=iife --outfile=dist/bundle.js --watch --servedir=. --serve-fallback=index.html"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  },
+  "dependencies": {
+    "three": "0.185.1"
+  }
+}

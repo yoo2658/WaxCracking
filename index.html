@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>왁스 뿌수기</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="scene-canvas"></canvas>
+
+  <div id="ui">
+    <h1>왁스 뿌수기</h1>
+
+    <section>
+      <h2>재질</h2>
+      <div class="button-row" data-group="material">
+        <button type="button" data-value="squishy" class="active">스퀴시</button>
+        <button type="button" data-value="slime">슬라임</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>텍스처</h2>
+      <div class="texture-row">
+        <input type="color" id="color-picker" value="#f0d75c" />
+        <label class="file-button">
+          사진 등록
+          <input type="file" id="photo-input" accept="image/png,image/jpeg" hidden />
+        </label>
+        <button type="button" id="remove-photo" disabled>사진 제거</button>
+      </div>
+      <p id="photo-name" class="hint"></p>
+    </section>
+
+    <section>
+      <button type="button" id="reset-button" class="reset">새 왁스로 리셋</button>
+    </section>
+
+    <p class="hint">클릭한 곳부터 왁스가 갈라져요. 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
+  </div>
+
+  <script src="dist/bundle.js"></script>
+</body>
+</html>
