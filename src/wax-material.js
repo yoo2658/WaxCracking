@@ -5,6 +5,7 @@ import {
   SHELL_FRAGMENT_COMMON,
   SHELL_FRAGMENT_COLOR,
   SHELL_FRAGMENT_ROUGHNESS,
+  SHELL_NORMAL_MAPS,
   CORE_VERTEX_COMMON,
   CORE_VERTEX_BEGIN,
   CORE_FRAGMENT_COMMON,
@@ -45,6 +46,7 @@ export function createShellMaterial() {
     projectionScale: { value: 1 },
     hazeAmount: { value: 0.45 },
     hasBrokenOnce: { value: 0 },
+    sparkleAmount: { value: 0 },
   };
 
   const material = new THREE.MeshPhysicalMaterial({
@@ -71,7 +73,8 @@ export function createShellMaterial() {
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', SHELL_FRAGMENT_COMMON)
       .replace('#include <color_fragment>', SHELL_FRAGMENT_COLOR)
-      .replace('#include <roughnessmap_fragment>', SHELL_FRAGMENT_ROUGHNESS);
+      .replace('#include <roughnessmap_fragment>', SHELL_FRAGMENT_ROUGHNESS)
+      .replace('#include <normal_fragment_maps>', SHELL_NORMAL_MAPS);
   };
 
   material.userData.waxUniforms = uniforms;
@@ -134,6 +137,7 @@ const SHELL_LOOK = {
     waxRoughnessBase: 0.38,
     clearcoat: 0.35,
     clearcoatRoughness: 0.4,
+    sparkleAmount: 0,
   },
   chocolate: {
     waxColor: 0x4a2a17,
@@ -141,17 +145,21 @@ const SHELL_LOOK = {
     waxRoughnessBase: 0.3,
     clearcoat: 0.6,
     clearcoatRoughness: 0.15,
+    sparkleAmount: 0,
   },
-  // Plain opaque sandy-tan placeholder for now — the actual sparkly,
-  // multi-color glitter shader is a separate, follow-up piece of work (see
-  // 22_Do.md); this just gets the type selectable and correctly opaque/matte
-  // in the meantime so its sound layer (audio.js) has something to attach to.
+  // Matte sandy base, translucent like "basic" (unlike chocolate) so what's
+  // inside still hazes through the granular coating, plus a bumpy grain
+  // texture and sparkle overlay (see SHELL_FRAGMENT_COLOR/ROUGHNESS/
+  // NORMAL_MAPS in wax-crack-chunks.js): grains are actually bumped (not just
+  // color-tinted), and a minority flash a random hue and go near-mirror
+  // smooth, so they catch specular light like real sugar/sand crystals.
   sand: {
-    waxColor: 0xd8bb7a,
-    hazeAmount: 0,
+    waxColor: 0xe6d2a0,
+    hazeAmount: 0.4,
     waxRoughnessBase: 0.75,
     clearcoat: 0.1,
     clearcoatRoughness: 0.6,
+    sparkleAmount: 1,
   },
 };
 
@@ -177,6 +185,7 @@ export function setShellLook(shellMaterial, waxType) {
   uniforms.waxColor.value.set(look.waxColor);
   uniforms.hazeAmount.value = look.hazeAmount;
   uniforms.waxRoughnessBase.value = look.waxRoughnessBase;
+  uniforms.sparkleAmount.value = look.sparkleAmount;
   shellMaterial.clearcoat = look.clearcoat;
   shellMaterial.clearcoatRoughness = look.clearcoatRoughness;
 }

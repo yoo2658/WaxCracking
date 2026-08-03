@@ -31865,6 +31865,35 @@ vec2 waxVoronoi(vec3 p){
   return vec2(f1, f2);
 }
 
+// Like waxVoronoi, but also returns the winning feature's own cell coordinate
+// (xyz) alongside its distance (w) \u2014 used for the sand wax type's granular
+// look, where each grain needs one stable identity shared by both its bump
+// height and its sparkle color, not just a boundary distance.
+vec4 waxVoronoiCell(vec3 p){
+  vec3 cellIndex = floor(p);
+  vec3 localPos = p - cellIndex;
+
+  float f1 = 8.0;
+  vec3 bestCell = cellIndex;
+
+  for (int k = -1; k <= 1; k++) {
+    for (int j = -1; j <= 1; j++) {
+      for (int i = -1; i <= 1; i++) {
+        vec3 offset = vec3(float(i), float(j), float(k));
+        vec3 h = waxHash3(cellIndex + offset);
+        vec3 featurePoint = offset + h;
+        float d = length(featurePoint - localPos);
+        if (d < f1) {
+          f1 = d;
+          bestCell = cellIndex + offset;
+        }
+      }
+    }
+  }
+
+  return vec4(bestCell, f1);
+}
+
 // Coarse trilinear value-noise, reusing the same hash, for organic haze marbling.
 float waxMarbleNoise(vec3 p){
   vec3 cellIndex = floor(p);
@@ -31894,6 +31923,7 @@ uniform sampler2D coreMap;
 uniform float projectionScale;
 uniform float hazeAmount;
 uniform float hasBrokenOnce;
+uniform float sparkleAmount;
 ${NOISE}
 `;
   var SHELL_FRAGMENT_COLOR = `#include <color_fragment>
@@ -31914,12 +31944,52 @@ vec3 hazyWax = mix(waxColor, hazeColor, haze);
 // (sharper than the blurry haze), darkened slightly at its very edge for
 // depth, and its alpha drops hard \u2014 a real split, not a tint.
 diffuseColor.rgb = mix(hazyWax, hazeColor, crack) * mix(1.0, 0.85, crack);
+
+// Granular sparkle (sand wax type only \u2014 sparkleAmount is 0 for every other
+// type, so all of this is a no-op elsewhere). A grain grid much finer than
+// the crack network, built from the same jittered-feature Voronoi as the
+// crack lines (waxVoronoiCell) so grains read as organic blobs, not an
+// axis-aligned grid. grainHeight (reused below, in the normal chunk, to
+// actually bump the shading normal \u2014 not just tint color) peaks at 1 in the
+// middle of each grain and falls to 0 at its edge, like a scattered pile of
+// granules stuck to the surface. A small minority of grains additionally
+// hash to a randomly-hued fleck \u2014 a fixed per-grain property, not view-gated
+// (real mica flecks read as colorful under any lighting). What DOES change
+// with view/light angle is how much those same grains actually catch the
+// light: SHELL_FRAGMENT_ROUGHNESS (below) drops roughness sharply on exactly
+// those texels, so the real per-pixel PBR specular pass produces the moving
+// "sparkle", not a hand-rolled facing term here.
+vec4 grainSample = waxVoronoiCell(vObjectPosition * 30.0);
+float grainHeight = 1.0 - clamp(grainSample.w, 0.0, 1.0);
+vec3 grainHash = waxHash3(grainSample.xyz);
+float isGlintGrain = step(0.94, grainHash.x); // ~6% of grains
+vec3 glintHue = 0.5 + 0.5 * cos(6.28318 * (grainHash.z + vec3(0.0, 0.33, 0.67)));
+float sparkleGlint = isGlintGrain * sparkleAmount;
+diffuseColor.rgb = mix(diffuseColor.rgb, glintHue, sparkleGlint * 0.55);
+// Grain bumps also read very slightly darker/lighter by height even where
+// they're not a colored glint, so the granular texture still shows under
+// flat lighting, not just wherever a light happens to catch a bump.
+diffuseColor.rgb *= mix(1.0, 0.92 + 0.16 * grainHeight, sparkleAmount);
+
 diffuseColor.a = 1.0 - crack * 0.9;
 
 if (vHoleMask > 0.5) discard;
 `;
   var SHELL_FRAGMENT_ROUGHNESS = `#include <roughnessmap_fragment>
 roughnessFactor = mix(waxRoughnessBase, waxRoughnessBase * 1.3, crack);
+roughnessFactor = mix(roughnessFactor, 0.08, sparkleGlint);
+`;
+  var SHELL_NORMAL_MAPS = `#include <normal_fragment_maps>
+if (sparkleAmount > 0.0) {
+  vec2 dHeight = vec2(dFdx(grainHeight), dFdy(grainHeight));
+  vec3 sigmaX = normalize(dFdx(vObjectPosition));
+  vec3 sigmaY = normalize(dFdy(vObjectPosition));
+  vec3 r1 = cross(sigmaY, normal);
+  vec3 r2 = cross(normal, sigmaX);
+  float det = dot(sigmaX, r1) * faceDirection;
+  vec3 grad = sign(det) * (dHeight.x * r1 + dHeight.y * r2);
+  normal = normalize(abs(det) * normal - grad * sparkleAmount * 1.4);
+}
 `;
   var CORE_VERTEX_COMMON = `#include <common>
 varying vec3 vObjectPosition;
@@ -31953,7 +32023,8 @@ diffuseColor.rgb = coreSample.rgb;
       coreMap: { value: makeDefaultCoreTexture() },
       projectionScale: { value: 1 },
       hazeAmount: { value: 0.45 },
-      hasBrokenOnce: { value: 0 }
+      hasBrokenOnce: { value: 0 },
+      sparkleAmount: { value: 0 }
     };
     const material = new MeshPhysicalMaterial({
       color: 16777215,
@@ -31971,7 +32042,7 @@ diffuseColor.rgb = coreSample.rgb;
     material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms);
       shader.vertexShader = shader.vertexShader.replace("#include <common>", SHELL_VERTEX_COMMON).replace("#include <begin_vertex>", SHELL_VERTEX_BEGIN);
-      shader.fragmentShader = shader.fragmentShader.replace("#include <common>", SHELL_FRAGMENT_COMMON).replace("#include <color_fragment>", SHELL_FRAGMENT_COLOR).replace("#include <roughnessmap_fragment>", SHELL_FRAGMENT_ROUGHNESS);
+      shader.fragmentShader = shader.fragmentShader.replace("#include <common>", SHELL_FRAGMENT_COMMON).replace("#include <color_fragment>", SHELL_FRAGMENT_COLOR).replace("#include <roughnessmap_fragment>", SHELL_FRAGMENT_ROUGHNESS).replace("#include <normal_fragment_maps>", SHELL_NORMAL_MAPS);
     };
     material.userData.waxUniforms = uniforms;
     return material;
@@ -32007,25 +32078,30 @@ diffuseColor.rgb = coreSample.rgb;
       hazeAmount: 0.45,
       waxRoughnessBase: 0.38,
       clearcoat: 0.35,
-      clearcoatRoughness: 0.4
+      clearcoatRoughness: 0.4,
+      sparkleAmount: 0
     },
     chocolate: {
       waxColor: 4860439,
       hazeAmount: 0,
       waxRoughnessBase: 0.3,
       clearcoat: 0.6,
-      clearcoatRoughness: 0.15
+      clearcoatRoughness: 0.15,
+      sparkleAmount: 0
     },
-    // Plain opaque sandy-tan placeholder for now — the actual sparkly,
-    // multi-color glitter shader is a separate, follow-up piece of work (see
-    // 22_Do.md); this just gets the type selectable and correctly opaque/matte
-    // in the meantime so its sound layer (audio.js) has something to attach to.
+    // Matte sandy base, translucent like "basic" (unlike chocolate) so what's
+    // inside still hazes through the granular coating, plus a bumpy grain
+    // texture and sparkle overlay (see SHELL_FRAGMENT_COLOR/ROUGHNESS/
+    // NORMAL_MAPS in wax-crack-chunks.js): grains are actually bumped (not just
+    // color-tinted), and a minority flash a random hue and go near-mirror
+    // smooth, so they catch specular light like real sugar/sand crystals.
     sand: {
-      waxColor: 14203770,
-      hazeAmount: 0,
+      waxColor: 15127200,
+      hazeAmount: 0.4,
       waxRoughnessBase: 0.75,
       clearcoat: 0.1,
-      clearcoatRoughness: 0.6
+      clearcoatRoughness: 0.6,
+      sparkleAmount: 1
     }
   };
   function setCoreMaterialMode(coreMaterial2, mode) {
@@ -32042,6 +32118,7 @@ diffuseColor.rgb = coreSample.rgb;
     uniforms.waxColor.value.set(look.waxColor);
     uniforms.hazeAmount.value = look.hazeAmount;
     uniforms.waxRoughnessBase.value = look.waxRoughnessBase;
+    uniforms.sparkleAmount.value = look.sparkleAmount;
     shellMaterial2.clearcoat = look.clearcoat;
     shellMaterial2.clearcoatRoughness = look.clearcoatRoughness;
   }
