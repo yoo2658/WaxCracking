@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FIRST_BREAK_HOLD_SECONDS } from './deformable-mesh.js';
 
 const TAP_MAX_MOVEMENT_PX = 6;
 const MIN_HOLD_STRENGTH = 1;
@@ -6,11 +7,13 @@ const MAX_HOLD_STRENGTH = 2.4;
 const HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
 
 /**
- * Distinguishes a tap from a drag on the canvas. Drags are left entirely to
- * OrbitControls (view rotation) — this class only watches for the
- * complementary case: pointerdown+pointerup with little movement in
- * between, which pokes+cracks the wax at that point. Because it only acts on
- * pointerup, it never fights OrbitControls for the same gesture.
+ * Presses the wax in real time: as soon as the pointer goes down, it starts
+ * denting immediately, and gets deeper the longer it's held — like actually
+ * pressing a thumb into something, not a discrete tap resolved only on
+ * release. Distinguishes a press from a drag: if the pointer moves past
+ * TAP_MAX_MOVEMENT_PX before release, the press is abandoned and OrbitControls
+ * (view rotation) takes over from there — this class never fights it for the
+ * same gesture, it just stops feeding the mesh once a drag is detected.
  */
 export class PointerInteraction {
   constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop }) {
@@ -22,30 +25,16 @@ export class PointerInteraction {
 
     this.raycaster = new THREE.Raycaster();
     this.ndc = new THREE.Vector2();
-    this.down = null;
+    this.active = null; // { downX, downY, point, normal, startTime, appliedStrength, brokeOrReleasedSound }
 
     const dom = renderer.domElement;
     dom.addEventListener('pointerdown', this._onDown);
+    dom.addEventListener('pointermove', this._onMove);
     dom.addEventListener('pointerup', this._onUp);
     dom.addEventListener('pointercancel', this._onCancel);
   }
 
   _onDown = (event) => {
-    this.down = { x: event.clientX, y: event.clientY, time: performance.now() };
-  };
-
-  _onCancel = () => {
-    this.down = null;
-  };
-
-  _onUp = (event) => {
-    const down = this.down;
-    this.down = null;
-    if (!down) return;
-
-    const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
-    if (moved >= TAP_MAX_MOVEMENT_PX) return; // was a view-rotation drag, not a tap
-
     const mesh = this.getActiveMesh();
     if (!mesh) return;
 
@@ -70,15 +59,75 @@ export class PointerInteraction {
     const point = mesh.surfacePointTowards(approx);
     const normal = point.clone().normalize();
 
-    // Holding the click longer before releasing hits harder — a quick tap
-    // is a light flick, a held-down press is a real push.
-    const holdSeconds = (performance.now() - down.time) / 1000;
-    const holdFraction = Math.min(holdSeconds / HOLD_SECONDS_FOR_MAX_STRENGTH, 1);
-    const strength = MIN_HOLD_STRENGTH + holdFraction * (MAX_HOLD_STRENGTH - MIN_HOLD_STRENGTH);
-
-    const fragmentSpawn = mesh.poke(point, normal, strength);
-
-    this.onPoke?.(strength);
-    if (fragmentSpawn) this.onFragmentPop?.(fragmentSpawn.point, normal, fragmentSpawn.radius);
+    this.active = {
+      downX: event.clientX,
+      downY: event.clientY,
+      point,
+      normal,
+      startTime: performance.now(),
+      appliedStrength: 0,
+      soundPlayed: false,
+    };
   };
+
+  _onMove = (event) => {
+    if (!this.active) return;
+    const moved = Math.hypot(event.clientX - this.active.downX, event.clientY - this.active.downY);
+    if (moved >= TAP_MAX_MOVEMENT_PX) this.active = null; // hand it off to OrbitControls as a drag
+  };
+
+  _onCancel = () => {
+    this.active = null;
+  };
+
+  _onUp = () => {
+    // A light tap that never held long enough to break anything still gets
+    // a soft tactile sound on release — a break (see update()) already
+    // played its own sound in sync the moment it happened, mid-hold or not.
+    if (this.active && !this.active.soundPlayed) {
+      this.onPoke?.(this._currentStrength(this.active));
+    }
+    this.active = null;
+  };
+
+  _currentStrength(active) {
+    const holdSeconds = (performance.now() - active.startTime) / 1000;
+    const holdFraction = Math.min(holdSeconds / HOLD_SECONDS_FOR_MAX_STRENGTH, 1);
+    return MIN_HOLD_STRENGTH + holdFraction * (MAX_HOLD_STRENGTH - MIN_HOLD_STRENGTH);
+  }
+
+  /** Called once per frame from the main render loop while a press is active. */
+  update() {
+    const active = this.active;
+    if (!active) return;
+
+    const mesh = this.getActiveMesh();
+    if (!mesh) {
+      this.active = null;
+      return;
+    }
+
+    const holdSeconds = (performance.now() - active.startTime) / 1000;
+
+    // A wax that has never broken at all stays completely rigid — no dent,
+    // no bulge, no crack — for the whole first-break hold: poke() isn't
+    // called at all yet, so nothing in the mesh moves. appliedStrength stays
+    // at 0 through this entire window, so the moment the gate opens, the
+    // very next call's delta is the FULL plateaued strength, not just that
+    // frame's sliver — the press "gives way" all at once instead of finishing
+    // off a dent that was already most of the way there.
+    if (!mesh.hasBrokenOnce && holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
+
+    const targetStrength = this._currentStrength(active);
+    const delta = Math.max(targetStrength - active.appliedStrength, 0);
+
+    const fragmentSpawn = mesh.poke(active.point, active.normal, delta, holdSeconds);
+    active.appliedStrength = targetStrength;
+
+    if (fragmentSpawn) {
+      active.soundPlayed = true;
+      this.onPoke?.(targetStrength, fragmentSpawn.isFirstBreak);
+      this.onFragmentPop?.(fragmentSpawn.point, active.normal, fragmentSpawn.radius);
+    }
+  }
 }

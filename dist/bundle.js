@@ -31039,12 +31039,13 @@ void main() {
     camera2.updateMatrixWorld();
     const hemi = new HemisphereLight(16774112, 1316379, 0.7);
     scene2.add(hemi);
+    scene2.add(camera2);
     const key = new DirectionalLight(16777215, 2.2);
-    key.position.set(3, 4, 5);
-    scene2.add(key);
+    key.position.set(1.5, 2, 2.5);
+    camera2.add(key);
     const rim = new DirectionalLight(12572927, 0.7);
-    rim.position.set(-4, -1.5, -3);
-    scene2.add(rim);
+    rim.position.set(-2, -1, -2.5);
+    camera2.add(rim);
     const ground = new Mesh(
       new CircleGeometry(6, 48),
       new MeshStandardMaterial({ color: 1711138, roughness: 0.95 })
@@ -31182,10 +31183,11 @@ void main() {
   var POKE_DEPTH_RATIO_OF_MAX = 0.72;
   var CRACK_RATE_PER_HIT = 0.55;
   var ELASTIC_DECAY_LAMBDA = 2.6;
-  var HOTSPOT_RADIUS_RATIO = 0.4;
-  var HOTSPOT_HIT_THRESHOLD = 2;
+  var BREAK_DAMAGE_THRESHOLD = 0.95;
   var HOLE_RADIUS_RATIO = 0.7;
   var FRAGMENT_RADIUS_RATIO = 0.18;
+  var FIRST_BREAK_HOLD_SECONDS = 2;
+  var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 2.5;
   var SHELL_THICKNESS_RATIO = 0.07;
   var BULGE_RISE_START_RATIO = 0.6;
   var BULGE_PEAK_RATIO = 1;
@@ -31193,7 +31195,7 @@ void main() {
   var BULGE_STRENGTH = 0.5;
   var DeformableMesh = class {
     constructor(geometry, coreMaterial2, shellMaterial2) {
-      this.materialMode = "squishy";
+      this.materialMode = "clay";
       geometry.computeBoundingSphere();
       this.radius = geometry.boundingSphere.radius;
       this.influenceRadius = this.radius * 0.5;
@@ -31240,7 +31242,7 @@ void main() {
       this.mesh.matrixAutoUpdate = false;
       this._dirtyPosition = false;
       this._dirtyAttributes = false;
-      this._hotspots = [];
+      this.hasBrokenOnce = false;
     }
     setMaterialMode(mode) {
       this.materialMode = mode;
@@ -31274,14 +31276,21 @@ void main() {
       return new Vector3(rest[i3], rest[i3 + 1], rest[i3 + 2]);
     }
     /**
-     * One-shot poke + crack at a clicked point. normal is the outward surface
-     * normal at that point; strength (>=1) scales dent depth, bulge, and crack
-     * damage — pointer-interaction.js derives it from how long the click was
-     * held. Returns a fragment-pop descriptor ({ point, radius }) once the same
-     * spot has been hit enough times, or null otherwise — the caller uses this
-     * to spawn a falling debris piece.
+     * Incremental poke + crack at a clicked point. normal is the outward
+     * surface normal at that point; strength scales dent depth, bulge, and
+     * crack damage. pointer-interaction.js calls this every frame during a
+     * hold, passing only the MARGINAL increase in strength since the last
+     * frame (not the cumulative total) — the underlying dent/bulge/crackDamage
+     * accumulation is a plain sum, so many small calls add up to exactly the
+     * same result as one big call with the total, whether the press was one
+     * long hold or several separate taps. holdSeconds is how long the CURRENT
+     * continuous press has lasted; it only matters for a wax that has never
+     * broken at all yet (see hasBrokenOnce below). Returns a fragment-pop
+     * descriptor ({ point, radius }) the moment a chunk actually breaks loose,
+     * or null otherwise — the caller uses this to spawn a falling debris piece
+     * and play the break sound in sync, even mid-hold.
      */
-    poke(pointWorld, normal, strength = 1) {
+    poke(pointWorld, normal, strength = 1, holdSeconds = 0) {
       const rest = this.restPosition;
       const restNormal = this.restNormal;
       const dentRadius = this.influenceRadius;
@@ -31300,12 +31309,18 @@ void main() {
         }
         this.elasticDecay = 1;
       }
+      let nearestIndex = 0;
+      let nearestDist = Infinity;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
         const dx = rest[i3] - pointWorld.x;
         const dy = rest[i3 + 1] - pointWorld.y;
         const dz = rest[i3 + 2] - pointWorld.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearestIndex = v;
+        }
         if (dist >= bulgeOuter) continue;
         const dentWeight = dist < dentRadius ? MathUtils.smoothstep(dentRadius - dist, 0, dentRadius) : 0;
         let bulgeWeight = 0;
@@ -31325,31 +31340,47 @@ void main() {
       }
       this._dirtyPosition = true;
       this._dirtyAttributes = true;
-      return this._registerHotspotHit(pointWorld);
+      return this._checkBreak(pointWorld, nearestIndex, holdSeconds);
     }
-    _registerHotspotHit(pointWorld) {
-      const hotspotRadius = this.radius * HOTSPOT_RADIUS_RATIO;
-      let spot = null;
-      for (const candidate of this._hotspots) {
-        if (candidate.point.distanceTo(pointWorld) < hotspotRadius) {
-          spot = candidate;
-          break;
-        }
+    /**
+     * Decides whether this poke just broke a chunk loose. Guarded by holeMask
+     * at the nearest vertex first: once the shell there has already fully
+     * opened up, there's no wax left to pop, so pressing on the exposed core
+     * underneath never spawns more debris (also what stops the very hole that
+     * just opened from immediately re-triggering next frame).
+     */
+    _checkBreak(pointWorld, nearestIndex, holdSeconds) {
+      if (this.holeMask[nearestIndex] > 0.5) return null;
+      if (!this.hasBrokenOnce) {
+        if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
+        this.hasBrokenOnce = true;
+        this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 1;
+        this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
+        this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
+        return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
       }
-      if (!spot) {
-        spot = { point: pointWorld.clone(), count: 0 };
-        this._hotspots.push(spot);
+      if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
+      this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
+      return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+    }
+    /** Widens the visible crack network around a point without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. */
+    _boostCrackAt(pointWorld, radius) {
+      const rest = this.restPosition;
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const dx = rest[i3] - pointWorld.x;
+        const dy = rest[i3 + 1] - pointWorld.y;
+        const dz = rest[i3 + 2] - pointWorld.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist >= radius) continue;
+        const weight = MathUtils.smoothstep(radius - dist, 0, radius);
+        this.crackDamage[v] = Math.max(this.crackDamage[v], weight);
       }
-      spot.count += 1;
-      if (spot.count < HOTSPOT_HIT_THRESHOLD) return null;
-      spot.count = 0;
-      this._boostHoleAt(pointWorld);
-      return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO };
+      this._dirtyAttributes = true;
     }
     /** Marks the spot a chunk just fell off of as a clean hole in the shell — no crack cosmetics there, and the shell fragment shader discards it so the core shows through. */
-    _boostHoleAt(pointWorld) {
+    _boostHoleAt(pointWorld, radius) {
       const rest = this.restPosition;
-      const radius = this.radius * HOLE_RADIUS_RATIO;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
         const dx = rest[i3] - pointWorld.x;
@@ -31429,7 +31460,8 @@ void main() {
       this.elasticDecay = 0;
       this.crackDamage.fill(0);
       this.holeMask.fill(0);
-      this._hotspots = [];
+      this.hasBrokenOnce = false;
+      this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 0;
       this._rebuildPositions();
       this.shellGeometry.attributes.crackDamage.needsUpdate = true;
       this.shellGeometry.attributes.holeMask.needsUpdate = true;
@@ -31520,6 +31552,7 @@ uniform float waxRoughnessBase;
 uniform sampler2D coreMap;
 uniform float projectionScale;
 uniform float hazeAmount;
+uniform float hasBrokenOnce;
 ${NOISE}
 `;
   var SHELL_FRAGMENT_COLOR = `#include <color_fragment>
@@ -31527,7 +31560,7 @@ vec2 waxVoronoiSample = waxVoronoi(vObjectPosition * crackCellFrequency);
 float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
 
 float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
-float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
+float crackSpread = smoothstep(0.0, 0.3, vCrackDamage) * hasBrokenOnce;
 float crack = crackLine * crackSpread * (1.0 - vHoleMask);
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
@@ -31578,7 +31611,8 @@ diffuseColor.rgb = coreSample.rgb;
       waxRoughnessBase: { value: 0.38 },
       coreMap: { value: makeDefaultCoreTexture() },
       projectionScale: { value: 1 },
-      hazeAmount: { value: 0.45 }
+      hazeAmount: { value: 0.45 },
+      hasBrokenOnce: { value: 0 }
     };
     const material = new MeshPhysicalMaterial({
       color: 16777215,
@@ -31647,24 +31681,14 @@ diffuseColor.rgb = coreSample.rgb;
       this.onFragmentPop = onFragmentPop;
       this.raycaster = new Raycaster();
       this.ndc = new Vector2();
-      this.down = null;
+      this.active = null;
       const dom = renderer2.domElement;
       dom.addEventListener("pointerdown", this._onDown);
+      dom.addEventListener("pointermove", this._onMove);
       dom.addEventListener("pointerup", this._onUp);
       dom.addEventListener("pointercancel", this._onCancel);
     }
     _onDown = (event) => {
-      this.down = { x: event.clientX, y: event.clientY, time: performance.now() };
-    };
-    _onCancel = () => {
-      this.down = null;
-    };
-    _onUp = (event) => {
-      const down = this.down;
-      this.down = null;
-      if (!down) return;
-      const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
-      if (moved >= TAP_MAX_MOVEMENT_PX) return;
       const mesh = this.getActiveMesh();
       if (!mesh) return;
       const rect = this.renderer.domElement.getBoundingClientRect();
@@ -31678,13 +31702,56 @@ diffuseColor.rgb = coreSample.rgb;
       if (!sphere || !this.raycaster.ray.intersectSphere(sphere, approx)) return;
       const point = mesh.surfacePointTowards(approx);
       const normal = point.clone().normalize();
-      const holdSeconds = (performance.now() - down.time) / 1e3;
-      const holdFraction = Math.min(holdSeconds / HOLD_SECONDS_FOR_MAX_STRENGTH, 1);
-      const strength = MIN_HOLD_STRENGTH + holdFraction * (MAX_HOLD_STRENGTH - MIN_HOLD_STRENGTH);
-      const fragmentSpawn = mesh.poke(point, normal, strength);
-      this.onPoke?.(strength);
-      if (fragmentSpawn) this.onFragmentPop?.(fragmentSpawn.point, normal, fragmentSpawn.radius);
+      this.active = {
+        downX: event.clientX,
+        downY: event.clientY,
+        point,
+        normal,
+        startTime: performance.now(),
+        appliedStrength: 0,
+        soundPlayed: false
+      };
     };
+    _onMove = (event) => {
+      if (!this.active) return;
+      const moved = Math.hypot(event.clientX - this.active.downX, event.clientY - this.active.downY);
+      if (moved >= TAP_MAX_MOVEMENT_PX) this.active = null;
+    };
+    _onCancel = () => {
+      this.active = null;
+    };
+    _onUp = () => {
+      if (this.active && !this.active.soundPlayed) {
+        this.onPoke?.(this._currentStrength(this.active));
+      }
+      this.active = null;
+    };
+    _currentStrength(active) {
+      const holdSeconds = (performance.now() - active.startTime) / 1e3;
+      const holdFraction = Math.min(holdSeconds / HOLD_SECONDS_FOR_MAX_STRENGTH, 1);
+      return MIN_HOLD_STRENGTH + holdFraction * (MAX_HOLD_STRENGTH - MIN_HOLD_STRENGTH);
+    }
+    /** Called once per frame from the main render loop while a press is active. */
+    update() {
+      const active = this.active;
+      if (!active) return;
+      const mesh = this.getActiveMesh();
+      if (!mesh) {
+        this.active = null;
+        return;
+      }
+      const holdSeconds = (performance.now() - active.startTime) / 1e3;
+      if (!mesh.hasBrokenOnce && holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
+      const targetStrength = this._currentStrength(active);
+      const delta = Math.max(targetStrength - active.appliedStrength, 0);
+      const fragmentSpawn = mesh.poke(active.point, active.normal, delta, holdSeconds);
+      active.appliedStrength = targetStrength;
+      if (fragmentSpawn) {
+        active.soundPlayed = true;
+        this.onPoke?.(targetStrength, fragmentSpawn.isFirstBreak);
+        this.onFragmentPop?.(fragmentSpawn.point, active.normal, fragmentSpawn.radius);
+      }
+    }
   };
 
   // src/fragments.js
@@ -31715,7 +31782,8 @@ diffuseColor.rgb = coreSample.rgb;
       this.items = [];
     }
     spawn(point, normal, color, size) {
-      const geometry = buildShardGeometry(size);
+      const randomizedSize = size * (0.5 + Math.random() * 1.3);
+      const geometry = buildShardGeometry(randomizedSize);
       const material = new MeshStandardMaterial({
         color,
         roughness: 0.55,
@@ -31820,13 +31888,28 @@ diffuseColor.rgb = coreSample.rgb;
   }
 
   // src/audio.js
-  var SOUND_SOURCES = {
-    squishy: "sounds/freesound_community-breaking-frozen-celery.mp3",
-    slime: "sounds/floraphonic-slime-squish-5.mp3"
-  };
+  var CLAY_FIRST_BREAK_SOUND = "sounds/freesound_community-breaking-frozen-celery-76261_[cut_1sec] (3).mp3";
+  var CLAY_SOUND_POOL = [
+    "sounds/freesound_community-breaking-frozen-celery-76261_[cut_0sec].mp3",
+    "sounds/freesound_community-breaking-frozen-celery-76261_[cut_1sec] (1).mp3",
+    "sounds/freesound_community-breaking-frozen-celery-76261_[cut_1sec] (2).mp3",
+    "sounds/freesound_community-breaking-frozen-celery-76261_[cut_1sec] (4).mp3",
+    "sounds/freesound_community-breaking-frozen-celery-76261_[cut_1sec].mp3"
+  ];
+  var SLIME_FIRST_BREAK_SOUND = "sounds/floraphonic-slime-squish-5.mp3";
+  var SLIME_SOUND_POOL = [
+    "sounds/freesound_community-slime-2-30099_[cut_0sec] (1).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec] (1).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec] (2).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec] (4).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec] (5).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec] (6).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec] (7).mp3",
+    "sounds/freesound_community-slime-2-30099_[cut_1sec].mp3"
+  ];
   var templates = {};
-  function templateFor(materialMode) {
-    const src = SOUND_SOURCES[materialMode] ?? SOUND_SOURCES.squishy;
+  var masterVolume = 1;
+  function templateForSrc(src) {
     if (!templates[src]) {
       const audio = new Audio(src);
       audio.preload = "auto";
@@ -31834,10 +31917,16 @@ diffuseColor.rgb = coreSample.rgb;
     }
     return templates[src];
   }
-  function playMaterialSound(materialMode, strength = 1) {
-    const template = templateFor(materialMode);
+  function setMasterVolume(volume) {
+    masterVolume = Math.min(1, Math.max(0, volume));
+  }
+  function playMaterialSound(materialMode, strength = 1, isFirstBreak = false) {
+    if (masterVolume <= 0) return;
+    const [firstBreakSound, pool] = materialMode === "clay" ? [CLAY_FIRST_BREAK_SOUND, CLAY_SOUND_POOL] : [SLIME_FIRST_BREAK_SOUND, SLIME_SOUND_POOL];
+    const src = isFirstBreak ? firstBreakSound : pool[Math.floor(Math.random() * pool.length)];
+    const template = templateForSrc(src);
     const clone = template.cloneNode();
-    clone.volume = Math.min(1, 0.75 + (strength - 1) * 0.18);
+    clone.volume = Math.min(1, 0.75 + (strength - 1) * 0.18) * masterVolume;
     clone.play().catch(() => {
     });
   }
@@ -31853,13 +31942,14 @@ diffuseColor.rgb = coreSample.rgb;
       });
     });
   }
-  function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhotoRemove, onReset }) {
+  function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhotoRemove, onReset, onVolumeChange }) {
     wireButtonGroup("material", onMaterialChange);
     const colorPicker = document.getElementById("color-picker");
     const photoInput = document.getElementById("photo-input");
     const removePhotoButton = document.getElementById("remove-photo");
     const photoNameLabel = document.getElementById("photo-name");
     const resetButton = document.getElementById("reset-button");
+    const volumeSlider = document.getElementById("volume-slider");
     colorPicker.addEventListener("input", () => {
       onColorChange(colorPicker.value);
     });
@@ -31880,6 +31970,10 @@ diffuseColor.rgb = coreSample.rgb;
       onColorChange(colorPicker.value);
     });
     resetButton.addEventListener("click", onReset);
+    volumeSlider.addEventListener("input", () => {
+      onVolumeChange(Number(volumeSlider.value) / 100);
+    });
+    onVolumeChange(Number(volumeSlider.value) / 100);
     const uiPanel = document.getElementById("ui");
     const uiToggle = document.getElementById("ui-toggle");
     uiToggle.addEventListener("click", () => {
@@ -31895,17 +31989,17 @@ diffuseColor.rgb = coreSample.rgb;
   var coreMaterial = createCoreMaterial();
   var shellMaterial = createShellMaterial();
   var fragments = new FragmentSystem(scene, groundY);
-  var currentMaterialMode = "squishy";
+  var currentMaterialMode = "clay";
   var deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
   deformable.setMaterialMode(currentMaterialMode);
   setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
-  new PointerInteraction({
+  var pointerInteraction = new PointerInteraction({
     renderer,
     camera,
     getActiveMesh: () => deformable,
-    onPoke: (strength) => playMaterialSound(currentMaterialMode, strength),
+    onPoke: (strength, isFirstBreak = false) => playMaterialSound(currentMaterialMode, strength, isFirstBreak),
     onFragmentPop: (point, normal, radius) => {
       fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
     }
@@ -31927,7 +32021,8 @@ diffuseColor.rgb = coreSample.rgb;
     onReset: () => {
       deformable.reset();
       fragments.reset();
-    }
+    },
+    onVolumeChange: (volume) => setMasterVolume(volume)
   });
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
   var lastTime = performance.now();
@@ -31935,6 +32030,7 @@ diffuseColor.rgb = coreSample.rgb;
     const now = performance.now();
     const dt = Math.min((now - lastTime) / 1e3, 0.05);
     lastTime = now;
+    pointerInteraction.update();
     deformable.update(dt);
     fragments.update(dt);
     controls.update();

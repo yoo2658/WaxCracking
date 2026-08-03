@@ -41,7 +41,10 @@ export class FragmentSystem {
   }
 
   spawn(point, normal, color, size) {
-    const geometry = buildShardGeometry(size);
+    // Vary the overall chip size, not just its jagged outline — otherwise
+    // every pop reads as the same uniform-sized chunk breaking off.
+    const randomizedSize = size * (0.5 + Math.random() * 1.3);
+    const geometry = buildShardGeometry(randomizedSize);
     const material = new THREE.MeshStandardMaterial({
       color,
       roughness: 0.55,

@@ -165,6 +165,12 @@ html, body {
   background: rgba(255, 255, 255, 0.08);
 }
 
+#volume-slider {
+  width: 100%;
+  accent-color: #5ec8f0;
+  cursor: pointer;
+}
+
 .hint {
   margin: 6px 0 0;
   font-size: 11px;

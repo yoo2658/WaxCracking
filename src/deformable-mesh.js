@@ -4,10 +4,11 @@ const MAX_PLASTIC_DISPLACEMENT_RATIO = 0.32;
 const POKE_DEPTH_RATIO_OF_MAX = 0.72; // poke depth relative to maxDisplacement, kept < 1 so thin shapes don't punch through
 const CRACK_RATE_PER_HIT = 0.55;
 const ELASTIC_DECAY_LAMBDA = 2.6; // lower = slower, gooier slime spring-back
-const HOTSPOT_RADIUS_RATIO = 0.4; // clicks within this distance count as "the same spot" — generous enough that ordinary hand/mouse imprecision on a real click still registers as a repeat hit
-const HOTSPOT_HIT_THRESHOLD = 2; // hits on the same spot before a chunk actually breaks off and falls. The first hit already shows the core through the thinning, increasingly see-through wax (crackDamage-driven alpha in the shell shader) — this threshold is only for the discrete "a piece physically comes loose" event, kept a little rarer so debris doesn't spawn on every single tap
+const BREAK_DAMAGE_THRESHOLD = 0.95; // crackDamage level (post-first-break) at which a chunk actually pops loose — reached by roughly two full-strength pokes at the same spot, continuous hold or separate taps alike
 const HOLE_RADIUS_RATIO = 0.7; // how much of the shell opens up per popped chunk. The smoothstep falloff below means the actual visible opening (where the interpolated mask crosses the 0.5 discard threshold) is roughly half of this ratio's radius
 const FRAGMENT_RADIUS_RATIO = 0.18; // size of the falling debris shard — deliberately much smaller than HOLE_RADIUS_RATIO, since a huge chunk flying off every hit read as excessive
+export const FIRST_BREAK_HOLD_SECONDS = 2; // a pristine, never-yet-broken wax needs one sustained press this long before it cracks open at all — like the real first crack of a fresh wax shell
+const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 2.5; // the payoff for that first sustained press is a dramatically wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area
 
 const SHELL_THICKNESS_RATIO = 0.07; // wax coating thickness, as a fraction of shape radius
 
@@ -24,8 +25,8 @@ const BULGE_STRENGTH = 0.5;
 /**
  * Owns two welded, indexed, vertex-corresponding geometries built from the
  * same base shape:
- *  - the CORE (slime/squishy): sits inset beneath the surface by
- *    shellThickness, carries the actual plastic (permanent, squishy) and
+ *  - the CORE (slime/clay): sits inset beneath the surface by
+ *    shellThickness, carries the actual plastic (permanent, clay) and
  *    elastic (transient, slime) displacement, and is textured with the
  *    user's photo/color in wax-material.js's core material. It has no idea
  *    cracks exist.
@@ -38,8 +39,14 @@ const BULGE_STRENGTH = 0.5;
  *    a hole is the real core mesh — an opaque, depth-correct surface —
  *    rather than a blended texture on the same skin.
  *
- * crackDamage (cosmetic crack growth) and holeMask (a spot where a chunk has
- * actually broken off and fallen) live on the shell only.
+ * crackDamage (cosmetic crack growth, 0-1 per vertex) and holeMask (a spot
+ * where a chunk has actually broken off and fallen) live on the shell only.
+ * A break is triggered per-poke by _checkBreak: normally once crackDamage at
+ * the poked spot crosses BREAK_DAMAGE_THRESHOLD (roughly two full-strength
+ * pokes there, whether from separate taps or one continuous hold — see
+ * poke()), but a wax that has never broken at all needs one single
+ * sustained FIRST_BREAK_HOLD_SECONDS-long press first, rewarded with an
+ * oversized first break.
  *
  * Both meshes are kept at an identity transform (no rotation/translation/
  * scale) for their whole lifetime, so raycast hit points in world space can
@@ -48,7 +55,7 @@ const BULGE_STRENGTH = 0.5;
  */
 export class DeformableMesh {
   constructor(geometry, coreMaterial, shellMaterial) {
-    this.materialMode = 'squishy'; // 'squishy' | 'slime'
+    this.materialMode = 'clay'; // 'clay' | 'slime'
 
     geometry.computeBoundingSphere();
     this.radius = geometry.boundingSphere.radius;
@@ -110,7 +117,7 @@ export class DeformableMesh {
 
     this._dirtyPosition = false;
     this._dirtyAttributes = false;
-    this._hotspots = []; // { point: Vector3, count: number } — tracks repeated hits near the same spot
+    this.hasBrokenOnce = false; // a pristine wax needs one sustained 3s press before anything cracks open at all
   }
 
   setMaterialMode(mode) {
@@ -149,14 +156,21 @@ export class DeformableMesh {
   }
 
   /**
-   * One-shot poke + crack at a clicked point. normal is the outward surface
-   * normal at that point; strength (>=1) scales dent depth, bulge, and crack
-   * damage — pointer-interaction.js derives it from how long the click was
-   * held. Returns a fragment-pop descriptor ({ point, radius }) once the same
-   * spot has been hit enough times, or null otherwise — the caller uses this
-   * to spawn a falling debris piece.
+   * Incremental poke + crack at a clicked point. normal is the outward
+   * surface normal at that point; strength scales dent depth, bulge, and
+   * crack damage. pointer-interaction.js calls this every frame during a
+   * hold, passing only the MARGINAL increase in strength since the last
+   * frame (not the cumulative total) — the underlying dent/bulge/crackDamage
+   * accumulation is a plain sum, so many small calls add up to exactly the
+   * same result as one big call with the total, whether the press was one
+   * long hold or several separate taps. holdSeconds is how long the CURRENT
+   * continuous press has lasted; it only matters for a wax that has never
+   * broken at all yet (see hasBrokenOnce below). Returns a fragment-pop
+   * descriptor ({ point, radius }) the moment a chunk actually breaks loose,
+   * or null otherwise — the caller uses this to spawn a falling debris piece
+   * and play the break sound in sync, even mid-hold.
    */
-  poke(pointWorld, normal, strength = 1) {
+  poke(pointWorld, normal, strength = 1, holdSeconds = 0) {
     const rest = this.restPosition;
     const restNormal = this.restNormal;
     const dentRadius = this.influenceRadius;
@@ -177,12 +191,19 @@ export class DeformableMesh {
       this.elasticDecay = 1;
     }
 
+    let nearestIndex = 0;
+    let nearestDist = Infinity;
+
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
       const dx = rest[i3] - pointWorld.x;
       const dy = rest[i3 + 1] - pointWorld.y;
       const dz = rest[i3 + 2] - pointWorld.z;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestIndex = v;
+      }
       if (dist >= bulgeOuter) continue;
 
       const dentWeight = dist < dentRadius ? THREE.MathUtils.smoothstep(dentRadius - dist, 0, dentRadius) : 0;
@@ -212,35 +233,56 @@ export class DeformableMesh {
     this._dirtyPosition = true;
     this._dirtyAttributes = true;
 
-    return this._registerHotspotHit(pointWorld);
+    return this._checkBreak(pointWorld, nearestIndex, holdSeconds);
   }
 
-  _registerHotspotHit(pointWorld) {
-    const hotspotRadius = this.radius * HOTSPOT_RADIUS_RATIO;
-    let spot = null;
-    for (const candidate of this._hotspots) {
-      if (candidate.point.distanceTo(pointWorld) < hotspotRadius) {
-        spot = candidate;
-        break;
-      }
-    }
-    if (!spot) {
-      spot = { point: pointWorld.clone(), count: 0 };
-      this._hotspots.push(spot);
-    }
-    spot.count += 1;
+  /**
+   * Decides whether this poke just broke a chunk loose. Guarded by holeMask
+   * at the nearest vertex first: once the shell there has already fully
+   * opened up, there's no wax left to pop, so pressing on the exposed core
+   * underneath never spawns more debris (also what stops the very hole that
+   * just opened from immediately re-triggering next frame).
+   */
+  _checkBreak(pointWorld, nearestIndex, holdSeconds) {
+    if (this.holeMask[nearestIndex] > 0.5) return null;
 
-    if (spot.count < HOTSPOT_HIT_THRESHOLD) return null;
+    if (!this.hasBrokenOnce) {
+      if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
+      this.hasBrokenOnce = true;
+      this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 1; // un-gates all crack-line visibility in the shell shader
+      // The dramatic payoff is a crack network radiating out far wider than
+      // an ordinary break — but the actual hole/fragment stay normal-sized,
+      // so the wax reads as "it just cracked all over" rather than "a huge
+      // chunk of it vanished".
+      this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
+      this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
+      return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
+    }
 
-    spot.count = 0; // let repeated clicking pop additional chunks from the same worn spot
-    this._boostHoleAt(pointWorld);
-    return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO };
+    if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
+    this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
+    return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+  }
+
+  /** Widens the visible crack network around a point without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. */
+  _boostCrackAt(pointWorld, radius) {
+    const rest = this.restPosition;
+    for (let v = 0; v < this.vertexCount; v++) {
+      const i3 = v * 3;
+      const dx = rest[i3] - pointWorld.x;
+      const dy = rest[i3 + 1] - pointWorld.y;
+      const dz = rest[i3 + 2] - pointWorld.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist >= radius) continue;
+      const weight = THREE.MathUtils.smoothstep(radius - dist, 0, radius);
+      this.crackDamage[v] = Math.max(this.crackDamage[v], weight);
+    }
+    this._dirtyAttributes = true;
   }
 
   /** Marks the spot a chunk just fell off of as a clean hole in the shell — no crack cosmetics there, and the shell fragment shader discards it so the core shows through. */
-  _boostHoleAt(pointWorld) {
+  _boostHoleAt(pointWorld, radius) {
     const rest = this.restPosition;
-    const radius = this.radius * HOLE_RADIUS_RATIO;
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
       const dx = rest[i3] - pointWorld.x;
@@ -336,7 +378,8 @@ export class DeformableMesh {
     this.elasticDecay = 0;
     this.crackDamage.fill(0);
     this.holeMask.fill(0);
-    this._hotspots = [];
+    this.hasBrokenOnce = false;
+    this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 0;
     this._rebuildPositions();
     this.shellGeometry.attributes.crackDamage.needsUpdate = true;
     this.shellGeometry.attributes.holeMask.needsUpdate = true;

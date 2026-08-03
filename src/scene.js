@@ -20,13 +20,21 @@ export function createScene(canvas) {
   const hemi = new THREE.HemisphereLight(0xfff3e0, 0x14161b, 0.7);
   scene.add(hemi);
 
+  // Key/rim lights are attached to the camera (not fixed in world space) so
+  // whatever side is currently facing the viewer stays lit as they orbit —
+  // the wax object itself never moves, only the camera does, so a
+  // world-fixed light would leave the far side dark after rotating away
+  // from it. Their target defaults to the origin, which is exactly where
+  // the object always sits, so no extra target wiring is needed.
+  scene.add(camera);
+
   const key = new THREE.DirectionalLight(0xffffff, 2.2);
-  key.position.set(3, 4, 5);
-  scene.add(key);
+  key.position.set(1.5, 2, 2.5);
+  camera.add(key);
 
   const rim = new THREE.DirectionalLight(0xbfd8ff, 0.7);
-  rim.position.set(-4, -1.5, -3);
-  scene.add(rim);
+  rim.position.set(-2, -1, -2.5);
+  camera.add(rim);
 
   // Catches fragments popped off the wax shell so they visibly land somewhere.
   const ground = new THREE.Mesh(

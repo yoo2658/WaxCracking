@@ -9,7 +9,7 @@ function wireButtonGroup(groupName, onSelect) {
   });
 }
 
-export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhotoRemove, onReset }) {
+export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhotoRemove, onReset, onVolumeChange }) {
   wireButtonGroup('material', onMaterialChange);
 
   const colorPicker = document.getElementById('color-picker');
@@ -17,6 +17,7 @@ export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhoto
   const removePhotoButton = document.getElementById('remove-photo');
   const photoNameLabel = document.getElementById('photo-name');
   const resetButton = document.getElementById('reset-button');
+  const volumeSlider = document.getElementById('volume-slider');
 
   colorPicker.addEventListener('input', () => {
     onColorChange(colorPicker.value);
@@ -43,6 +44,11 @@ export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhoto
   });
 
   resetButton.addEventListener('click', onReset);
+
+  volumeSlider.addEventListener('input', () => {
+    onVolumeChange(Number(volumeSlider.value) / 100);
+  });
+  onVolumeChange(Number(volumeSlider.value) / 100);
 
   // The panel covers a lot of a phone-sized screen, blocking taps on the wax
   // underneath it — let it collapse down to just this header/toggle so the

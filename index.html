@@ -19,7 +19,7 @@
       <section>
         <h2>재질</h2>
         <div class="button-row" data-group="material">
-          <button type="button" data-value="squishy" class="active">스퀴시</button>
+          <button type="button" data-value="clay" class="active">클레이</button>
           <button type="button" data-value="slime">슬라임</button>
         </div>
       </section>
@@ -38,10 +38,15 @@
       </section>
 
       <section>
+        <h2>볼륨</h2>
+        <input type="range" id="volume-slider" min="0" max="100" value="100" />
+      </section>
+
+      <section>
         <button type="button" id="reset-button" class="reset">새 왁스로 리셋</button>
       </section>
 
-      <p class="hint">클릭한 곳부터 왁스가 갈라져요. 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
+      <p class="hint">클릭한 순간부터 눌리고, 오래 누를수록 세게 눌려요. 새 왁스는 3초 이상 눌러야 처음 크게 갈라져요. 그 뒤로는 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
     </div>
   </div>
 
