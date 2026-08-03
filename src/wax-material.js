@@ -114,6 +114,26 @@ export function createCoreMaterial() {
   return material;
 }
 
+const CORE_LOOK = {
+  clay: { transparent: false, opacity: 1, roughness: 0.55, clearcoat: 0.15, clearcoatRoughness: 0.5 },
+  slime: { transparent: false, opacity: 1, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.25 },
+};
+
+/**
+ * Slime's inner material reads as wet/glossy (low roughness, strong
+ * clearcoat); clay stays matte. Both are fully opaque — transparency was
+ * tried for slime but made the far side of the sphere visible through the
+ * near side, which read as a rendering glitch rather than a gel look.
+ */
+export function setCoreMaterialMode(coreMaterial, mode) {
+  const look = CORE_LOOK[mode] ?? CORE_LOOK.clay;
+  coreMaterial.transparent = look.transparent;
+  coreMaterial.opacity = look.opacity;
+  coreMaterial.roughness = look.roughness;
+  coreMaterial.clearcoat = look.clearcoat;
+  coreMaterial.clearcoatRoughness = look.clearcoatRoughness;
+}
+
 /** Both materials share the same texture reference — the core renders it directly, the shell only as a blurry haze hint. */
 export function setCoreTexture(coreMaterial, shellMaterial, texture) {
   const old = coreMaterial.userData.waxUniforms.coreMap.value;

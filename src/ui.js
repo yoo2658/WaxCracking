@@ -62,3 +62,26 @@ export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhoto
 
   return { initialColor: colorPicker.value };
 }
+
+const PRESS_PROGRESS_CIRCUMFERENCE = 163.36; // 2 * PI * r, r=26 (see index.html)
+
+/**
+ * Fills in the ring around the pointer while a fresh wax's hold-to-break
+ * timer is running — the wax itself stays deliberately still during that
+ * wait, so this is the only feedback that the press registered at all.
+ * Call with x === null to hide it (release, drag, or the break itself).
+ */
+export function updatePressProgress(x, y, progress) {
+  const svg = document.getElementById('press-progress');
+  if (x === null) {
+    svg.classList.remove('visible');
+    return;
+  }
+
+  svg.style.left = `${x}px`;
+  svg.style.top = `${y}px`;
+  document.getElementById('press-progress-fill').style.strokeDashoffset = String(
+    PRESS_PROGRESS_CIRCUMFERENCE * (1 - progress),
+  );
+  svg.classList.add('visible');
+}

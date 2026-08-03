@@ -7,7 +7,7 @@ const ELASTIC_DECAY_LAMBDA = 2.6; // lower = slower, gooier slime spring-back
 const BREAK_DAMAGE_THRESHOLD = 0.95; // crackDamage level (post-first-break) at which a chunk actually pops loose — reached by roughly two full-strength pokes at the same spot, continuous hold or separate taps alike
 const HOLE_RADIUS_RATIO = 0.7; // how much of the shell opens up per popped chunk. The smoothstep falloff below means the actual visible opening (where the interpolated mask crosses the 0.5 discard threshold) is roughly half of this ratio's radius
 const FRAGMENT_RADIUS_RATIO = 0.18; // size of the falling debris shard — deliberately much smaller than HOLE_RADIUS_RATIO, since a huge chunk flying off every hit read as excessive
-export const FIRST_BREAK_HOLD_SECONDS = 2; // a pristine, never-yet-broken wax needs one sustained press this long before it cracks open at all — like the real first crack of a fresh wax shell
+export const FIRST_BREAK_HOLD_SECONDS = 1.5; // a pristine, never-yet-broken wax needs one sustained press this long before it cracks open at all — like the real first crack of a fresh wax shell
 const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 2.5; // the payoff for that first sustained press is a dramatically wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area
 
 const SHELL_THICKNESS_RATIO = 0.07; // wax coating thickness, as a fraction of shape radius

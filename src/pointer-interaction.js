@@ -16,12 +16,13 @@ const HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
  * same gesture, it just stops feeding the mesh once a drag is detected.
  */
 export class PointerInteraction {
-  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop }) {
+  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress }) {
     this.renderer = renderer;
     this.camera = camera;
     this.getActiveMesh = getActiveMesh;
     this.onPoke = onPoke;
     this.onFragmentPop = onFragmentPop;
+    this.onPressProgress = onPressProgress;
 
     this.raycaster = new THREE.Raycaster();
     this.ndc = new THREE.Vector2();
@@ -32,6 +33,10 @@ export class PointerInteraction {
     dom.addEventListener('pointermove', this._onMove);
     dom.addEventListener('pointerup', this._onUp);
     dom.addEventListener('pointercancel', this._onCancel);
+    // A long press is exactly our "hold to break" gesture — without this,
+    // mobile browsers read it as a text-selection/callout gesture and pop up
+    // their own context menu (e.g. "Copy") on top of it.
+    dom.addEventListener('contextmenu', (event) => event.preventDefault());
   }
 
   _onDown = (event) => {
@@ -73,11 +78,15 @@ export class PointerInteraction {
   _onMove = (event) => {
     if (!this.active) return;
     const moved = Math.hypot(event.clientX - this.active.downX, event.clientY - this.active.downY);
-    if (moved >= TAP_MAX_MOVEMENT_PX) this.active = null; // hand it off to OrbitControls as a drag
+    if (moved >= TAP_MAX_MOVEMENT_PX) {
+      this.active = null; // hand it off to OrbitControls as a drag
+      this.onPressProgress?.(null);
+    }
   };
 
   _onCancel = () => {
     this.active = null;
+    this.onPressProgress?.(null);
   };
 
   _onUp = () => {
@@ -88,6 +97,7 @@ export class PointerInteraction {
       this.onPoke?.(this._currentStrength(this.active));
     }
     this.active = null;
+    this.onPressProgress?.(null);
   };
 
   _currentStrength(active) {
@@ -116,7 +126,15 @@ export class PointerInteraction {
     // very next call's delta is the FULL plateaued strength, not just that
     // frame's sliver — the press "gives way" all at once instead of finishing
     // off a dent that was already most of the way there.
-    if (!mesh.hasBrokenOnce && holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
+    if (!mesh.hasBrokenOnce) {
+      // The wax itself stays silent and unmoving through this whole wait, so
+      // without some other cue it's easy to think the press didn't register
+      // at all — a small on-screen ring fills up instead, independent of the
+      // wax's own (deliberately blank) visual state.
+      this.onPressProgress?.(active.downX, active.downY, Math.min(holdSeconds / FIRST_BREAK_HOLD_SECONDS, 1));
+      if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
+      this.onPressProgress?.(null);
+    }
 
     const targetStrength = this._currentStrength(active);
     const delta = Math.max(targetStrength - active.appliedStrength, 0);

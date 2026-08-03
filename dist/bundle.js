@@ -31186,7 +31186,7 @@ void main() {
   var BREAK_DAMAGE_THRESHOLD = 0.95;
   var HOLE_RADIUS_RATIO = 0.7;
   var FRAGMENT_RADIUS_RATIO = 0.18;
-  var FIRST_BREAK_HOLD_SECONDS = 2;
+  var FIRST_BREAK_HOLD_SECONDS = 1.5;
   var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 2.5;
   var SHELL_THICKNESS_RATIO = 0.07;
   var BULGE_RISE_START_RATIO = 0.6;
@@ -31656,6 +31656,18 @@ diffuseColor.rgb = coreSample.rgb;
     material.userData.waxUniforms = uniforms;
     return material;
   }
+  var CORE_LOOK = {
+    clay: { transparent: false, opacity: 1, roughness: 0.55, clearcoat: 0.15, clearcoatRoughness: 0.5 },
+    slime: { transparent: false, opacity: 1, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.25 }
+  };
+  function setCoreMaterialMode(coreMaterial2, mode) {
+    const look = CORE_LOOK[mode] ?? CORE_LOOK.clay;
+    coreMaterial2.transparent = look.transparent;
+    coreMaterial2.opacity = look.opacity;
+    coreMaterial2.roughness = look.roughness;
+    coreMaterial2.clearcoat = look.clearcoat;
+    coreMaterial2.clearcoatRoughness = look.clearcoatRoughness;
+  }
   function setCoreTexture(coreMaterial2, shellMaterial2, texture) {
     const old = coreMaterial2.userData.waxUniforms.coreMap.value;
     coreMaterial2.userData.waxUniforms.coreMap.value = texture;
@@ -31673,12 +31685,13 @@ diffuseColor.rgb = coreSample.rgb;
   var MAX_HOLD_STRENGTH = 2.4;
   var HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
   var PointerInteraction = class {
-    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop }) {
+    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress }) {
       this.renderer = renderer2;
       this.camera = camera2;
       this.getActiveMesh = getActiveMesh;
       this.onPoke = onPoke;
       this.onFragmentPop = onFragmentPop;
+      this.onPressProgress = onPressProgress;
       this.raycaster = new Raycaster();
       this.ndc = new Vector2();
       this.active = null;
@@ -31687,6 +31700,7 @@ diffuseColor.rgb = coreSample.rgb;
       dom.addEventListener("pointermove", this._onMove);
       dom.addEventListener("pointerup", this._onUp);
       dom.addEventListener("pointercancel", this._onCancel);
+      dom.addEventListener("contextmenu", (event) => event.preventDefault());
     }
     _onDown = (event) => {
       const mesh = this.getActiveMesh();
@@ -31715,16 +31729,21 @@ diffuseColor.rgb = coreSample.rgb;
     _onMove = (event) => {
       if (!this.active) return;
       const moved = Math.hypot(event.clientX - this.active.downX, event.clientY - this.active.downY);
-      if (moved >= TAP_MAX_MOVEMENT_PX) this.active = null;
+      if (moved >= TAP_MAX_MOVEMENT_PX) {
+        this.active = null;
+        this.onPressProgress?.(null);
+      }
     };
     _onCancel = () => {
       this.active = null;
+      this.onPressProgress?.(null);
     };
     _onUp = () => {
       if (this.active && !this.active.soundPlayed) {
         this.onPoke?.(this._currentStrength(this.active));
       }
       this.active = null;
+      this.onPressProgress?.(null);
     };
     _currentStrength(active) {
       const holdSeconds = (performance.now() - active.startTime) / 1e3;
@@ -31741,7 +31760,11 @@ diffuseColor.rgb = coreSample.rgb;
         return;
       }
       const holdSeconds = (performance.now() - active.startTime) / 1e3;
-      if (!mesh.hasBrokenOnce && holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
+      if (!mesh.hasBrokenOnce) {
+        this.onPressProgress?.(active.downX, active.downY, Math.min(holdSeconds / FIRST_BREAK_HOLD_SECONDS, 1));
+        if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
+        this.onPressProgress?.(null);
+      }
       const targetStrength = this._currentStrength(active);
       const delta = Math.max(targetStrength - active.appliedStrength, 0);
       const fragmentSpawn = mesh.poke(active.point, active.normal, delta, holdSeconds);
@@ -31982,6 +32005,20 @@ diffuseColor.rgb = coreSample.rgb;
     });
     return { initialColor: colorPicker.value };
   }
+  var PRESS_PROGRESS_CIRCUMFERENCE = 163.36;
+  function updatePressProgress(x, y, progress) {
+    const svg = document.getElementById("press-progress");
+    if (x === null) {
+      svg.classList.remove("visible");
+      return;
+    }
+    svg.style.left = `${x}px`;
+    svg.style.top = `${y}px`;
+    document.getElementById("press-progress-fill").style.strokeDashoffset = String(
+      PRESS_PROGRESS_CIRCUMFERENCE * (1 - progress)
+    );
+    svg.classList.add("visible");
+  }
 
   // src/main.js
   var canvas = document.getElementById("scene-canvas");
@@ -31992,6 +32029,7 @@ diffuseColor.rgb = coreSample.rgb;
   var currentMaterialMode = "clay";
   var deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
   deformable.setMaterialMode(currentMaterialMode);
+  setCoreMaterialMode(coreMaterial, currentMaterialMode);
   setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
@@ -32002,12 +32040,14 @@ diffuseColor.rgb = coreSample.rgb;
     onPoke: (strength, isFirstBreak = false) => playMaterialSound(currentMaterialMode, strength, isFirstBreak),
     onFragmentPop: (point, normal, radius) => {
       fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
-    }
+    },
+    onPressProgress: updatePressProgress
   });
   var { initialColor } = initUI({
     onMaterialChange: (mode) => {
       currentMaterialMode = mode;
       deformable.setMaterialMode(mode);
+      setCoreMaterialMode(coreMaterial, mode);
     },
     onColorChange: (hex) => {
       setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));

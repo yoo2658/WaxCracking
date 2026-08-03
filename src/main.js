@@ -1,12 +1,18 @@
 import { createScene } from './scene.js';
 import { buildSphereGeometry } from './geometries.js';
 import { DeformableMesh } from './deformable-mesh.js';
-import { createCoreMaterial, createShellMaterial, setCoreTexture, setProjectionScale } from './wax-material.js';
+import {
+  createCoreMaterial,
+  createShellMaterial,
+  setCoreTexture,
+  setProjectionScale,
+  setCoreMaterialMode,
+} from './wax-material.js';
 import { PointerInteraction } from './pointer-interaction.js';
 import { FragmentSystem } from './fragments.js';
 import { loadPhotoTexture, makeColorTexture } from './texture-loader.js';
 import { playMaterialSound, setMasterVolume } from './audio.js';
-import { initUI } from './ui.js';
+import { initUI, updatePressProgress } from './ui.js';
 
 const canvas = document.getElementById('scene-canvas');
 const { renderer, scene, camera, controls, groundY } = createScene(canvas);
@@ -18,6 +24,7 @@ let currentMaterialMode = 'clay';
 
 const deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
 deformable.setMaterialMode(currentMaterialMode);
+setCoreMaterialMode(coreMaterial, currentMaterialMode);
 setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
 scene.add(deformable.coreMesh);
 scene.add(deformable.mesh);
@@ -30,12 +37,14 @@ const pointerInteraction = new PointerInteraction({
   onFragmentPop: (point, normal, radius) => {
     fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
   },
+  onPressProgress: updatePressProgress,
 });
 
 const { initialColor } = initUI({
   onMaterialChange: (mode) => {
     currentMaterialMode = mode;
     deformable.setMaterialMode(mode);
+    setCoreMaterialMode(coreMaterial, mode);
   },
   onColorChange: (hex) => {
     setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));

@@ -9,6 +9,21 @@
 <body>
   <canvas id="scene-canvas"></canvas>
 
+  <svg id="press-progress" width="64" height="64" viewBox="0 0 64 64" aria-hidden="true">
+    <circle cx="32" cy="32" r="26" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="6" />
+    <circle
+      id="press-progress-fill"
+      cx="32" cy="32" r="26"
+      fill="none"
+      stroke="#f0d75c"
+      stroke-width="6"
+      stroke-linecap="round"
+      stroke-dasharray="163.36"
+      stroke-dashoffset="163.36"
+      transform="rotate(-90 32 32)"
+    />
+  </svg>
+
   <div id="ui">
     <div class="ui-header">
       <h1>왁스 뿌수기</h1>
@@ -46,7 +61,7 @@
         <button type="button" id="reset-button" class="reset">새 왁스로 리셋</button>
       </section>
 
-      <p class="hint">클릭한 순간부터 눌리고, 오래 누를수록 세게 눌려요. 새 왁스는 3초 이상 눌러야 처음 크게 갈라져요. 그 뒤로는 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
+      <p class="hint">클릭한 순간부터 눌리고, 오래 누를수록 세게 눌려요. 새 왁스는 1.5초 이상 눌러야 처음 크게 갈라져요. 그 뒤로는 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
     </div>
   </div>
 

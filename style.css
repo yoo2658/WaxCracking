@@ -18,10 +18,43 @@ html, body {
   width: 100%;
   height: 100%;
   cursor: grab;
+  /* A long press on mobile is exactly our "hold to break" gesture, but
+     without this the browser reads it as a text-selection/callout gesture
+     and pops up its own "copy" menu instead. */
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 #scene-canvas:active {
   cursor: grabbing;
+}
+
+/* Fills in over the fresh wax's hold-to-break window — the wax itself stays
+   deliberately still and silent through that wait, so this is the only cue
+   that the press registered and is building up. Positioned at the press
+   point each frame from JS; hidden the rest of the time. */
+#press-progress {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 64px;
+  height: 64px;
+  margin-left: -32px;
+  margin-top: -32px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 5;
+}
+
+#press-progress.visible {
+  opacity: 1;
+}
+
+#press-progress-fill {
+  transition: stroke-dashoffset 0.05s linear;
 }
 
 #ui {
