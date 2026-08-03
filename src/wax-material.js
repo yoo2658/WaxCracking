@@ -119,6 +119,42 @@ const CORE_LOOK = {
   slime: { transparent: false, opacity: 1, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.25 },
 };
 
+// The outer shell's own look, independent of both the clay/slime press
+// physics (CORE_LOOK, above) and the user's chosen color/photo (which only
+// ever drives the CORE underneath — see setCoreTexture). "basic" is the
+// original frosted-translucent wax: a fixed cream tint blended with a hazy
+// hint of whatever's inside. "chocolate" turns that haze off entirely
+// (hazeAmount: 0) so the shell reads as a fully opaque, uniformly
+// chocolate-colored coating — what's inside only shows up once a piece
+// actually breaks off, same as any other wax type.
+const SHELL_LOOK = {
+  basic: {
+    waxColor: 0xf7f2e6,
+    hazeAmount: 0.45,
+    waxRoughnessBase: 0.38,
+    clearcoat: 0.35,
+    clearcoatRoughness: 0.4,
+  },
+  chocolate: {
+    waxColor: 0x4a2a17,
+    hazeAmount: 0,
+    waxRoughnessBase: 0.3,
+    clearcoat: 0.6,
+    clearcoatRoughness: 0.15,
+  },
+  // Plain opaque sandy-tan placeholder for now — the actual sparkly,
+  // multi-color glitter shader is a separate, follow-up piece of work (see
+  // 22_Do.md); this just gets the type selectable and correctly opaque/matte
+  // in the meantime so its sound layer (audio.js) has something to attach to.
+  sand: {
+    waxColor: 0xd8bb7a,
+    hazeAmount: 0,
+    waxRoughnessBase: 0.75,
+    clearcoat: 0.1,
+    clearcoatRoughness: 0.6,
+  },
+};
+
 /**
  * Slime's inner material reads as wet/glossy (low roughness, strong
  * clearcoat); clay stays matte. Both are fully opaque — transparency was
@@ -132,6 +168,17 @@ export function setCoreMaterialMode(coreMaterial, mode) {
   coreMaterial.roughness = look.roughness;
   coreMaterial.clearcoat = look.clearcoat;
   coreMaterial.clearcoatRoughness = look.clearcoatRoughness;
+}
+
+/** Applies a wax-type preset (basic/chocolate/…) to the shell only — leaves the core (clay/slime physics look) and the user's chosen color/photo untouched. */
+export function setShellLook(shellMaterial, waxType) {
+  const look = SHELL_LOOK[waxType] ?? SHELL_LOOK.basic;
+  const uniforms = shellMaterial.userData.waxUniforms;
+  uniforms.waxColor.value.set(look.waxColor);
+  uniforms.hazeAmount.value = look.hazeAmount;
+  uniforms.waxRoughnessBase.value = look.waxRoughnessBase;
+  shellMaterial.clearcoat = look.clearcoat;
+  shellMaterial.clearcoatRoughness = look.clearcoatRoughness;
 }
 
 /** Both materials share the same texture reference — the core renders it directly, the shell only as a blurry haze hint. */

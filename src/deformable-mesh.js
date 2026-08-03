@@ -98,6 +98,7 @@ export class DeformableMesh {
     this.plasticOffset = new Float32Array(this.vertexCount * 3);
     this.elasticSnapshot = new Float32Array(this.vertexCount * 3);
     this.elasticDecay = 0;
+    this._elasticHeld = false;
 
     const crackDamage = new Float32Array(this.vertexCount);
     shellGeometry.setAttribute('crackDamage', new THREE.BufferAttribute(crackDamage, 1));
@@ -184,11 +185,21 @@ export class DeformableMesh {
     const dirZ = -normal.z * depth;
 
     if (this.materialMode === 'slime') {
-      const decay = this.elasticDecay;
-      if (decay > 0 && decay < 1) {
-        for (let i = 0; i < target.length; i++) target[i] *= decay;
+      // Only bake in the current decay fraction on the FIRST poke of a fresh
+      // hold (fresh press, or resuming mid-bounce right after a release) —
+      // _elasticHeld marks a hold as already "caught" so every later frame of
+      // the SAME continuous hold skips this, leaving elasticDecay pinned at
+      // exactly 1 (see update()) instead of being re-baked/eroded every
+      // frame, which previously caused the dent to visibly shrink back even
+      // while still being held down.
+      if (!this._elasticHeld) {
+        const decay = this.elasticDecay;
+        if (decay > 0 && decay < 1) {
+          for (let i = 0; i < target.length; i++) target[i] *= decay;
+        }
+        this.elasticDecay = 1;
       }
-      this.elasticDecay = 1;
+      this._elasticHeld = true;
     }
 
     let nearestIndex = 0;
@@ -317,9 +328,18 @@ export class DeformableMesh {
   update(dt) {
     let needsPositionRebuild = this._dirtyPosition;
 
-    if (this.elasticDecay > 0) {
+    if (this._elasticHeld) {
+      // Still being pressed this frame (poke() ran and re-marked this) —
+      // stay fully dented, don't spring back yet. Consume the flag so that
+      // if poke() isn't called again next frame (released, or handed off to
+      // a drag), decay actually starts running from there.
+      this._elasticHeld = false;
+    } else if (this.elasticDecay > 0) {
       this.elasticDecay = THREE.MathUtils.damp(this.elasticDecay, 0, ELASTIC_DECAY_LAMBDA, dt);
-      if (this.elasticDecay < 0.002) this.elasticDecay = 0;
+      if (this.elasticDecay < 0.002) {
+        this.elasticDecay = 0;
+        this.elasticSnapshot.fill(0); // clear stale raw offsets so the next press starts clean, not with an instant pop back to old history
+      }
       needsPositionRebuild = true;
     }
 
@@ -376,6 +396,7 @@ export class DeformableMesh {
     this.plasticOffset.fill(0);
     this.elasticSnapshot.fill(0);
     this.elasticDecay = 0;
+    this._elasticHeld = false;
     this.crackDamage.fill(0);
     this.holeMask.fill(0);
     this.hasBrokenOnce = false;

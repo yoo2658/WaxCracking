@@ -15025,6 +15025,445 @@
       vertices.push(contour[i].y);
     }
   }
+  var ExtrudeGeometry = class _ExtrudeGeometry extends BufferGeometry {
+    /**
+     * Constructs a new extrude geometry.
+     *
+     * @param {Shape|Array<Shape>} [shapes] - A shape or an array of shapes.
+     * @param {ExtrudeGeometry~Options} [options] - The extrude settings.
+     */
+    constructor(shapes = new Shape([new Vector2(0.5, 0.5), new Vector2(-0.5, 0.5), new Vector2(-0.5, -0.5), new Vector2(0.5, -0.5)]), options = {}) {
+      super();
+      this.type = "ExtrudeGeometry";
+      this.parameters = {
+        shapes,
+        options
+      };
+      shapes = Array.isArray(shapes) ? shapes : [shapes];
+      const scope = this;
+      const verticesArray = [];
+      const uvArray = [];
+      for (let i = 0, l = shapes.length; i < l; i++) {
+        const shape = shapes[i];
+        addShape(shape);
+      }
+      this.setAttribute("position", new Float32BufferAttribute(verticesArray, 3));
+      this.setAttribute("uv", new Float32BufferAttribute(uvArray, 2));
+      this.computeVertexNormals();
+      function addShape(shape) {
+        const placeholder = [];
+        const curveSegments = options.curveSegments !== void 0 ? options.curveSegments : 12;
+        const steps = options.steps !== void 0 ? options.steps : 1;
+        const depth = options.depth !== void 0 ? options.depth : 1;
+        let bevelEnabled = options.bevelEnabled !== void 0 ? options.bevelEnabled : true;
+        let bevelThickness = options.bevelThickness !== void 0 ? options.bevelThickness : 0.2;
+        let bevelSize = options.bevelSize !== void 0 ? options.bevelSize : bevelThickness - 0.1;
+        let bevelOffset = options.bevelOffset !== void 0 ? options.bevelOffset : 0;
+        let bevelSegments = options.bevelSegments !== void 0 ? options.bevelSegments : 3;
+        const extrudePath = options.extrudePath;
+        const uvgen = options.UVGenerator !== void 0 ? options.UVGenerator : WorldUVGenerator;
+        let extrudePts, extrudeByPath = false;
+        let splineTube, binormal, normal, position2;
+        if (extrudePath) {
+          extrudePts = extrudePath.getSpacedPoints(steps);
+          extrudeByPath = true;
+          bevelEnabled = false;
+          const isClosed = extrudePath.isCatmullRomCurve3 ? extrudePath.closed : false;
+          splineTube = extrudePath.computeFrenetFrames(steps, isClosed);
+          binormal = new Vector3();
+          normal = new Vector3();
+          position2 = new Vector3();
+        }
+        if (!bevelEnabled) {
+          bevelSegments = 0;
+          bevelThickness = 0;
+          bevelSize = 0;
+          bevelOffset = 0;
+        }
+        const shapePoints = shape.extractPoints(curveSegments);
+        let vertices = shapePoints.shape;
+        const holes = shapePoints.holes;
+        const reverse = !ShapeUtils.isClockWise(vertices);
+        if (reverse) {
+          vertices = vertices.reverse();
+          for (let h = 0, hl = holes.length; h < hl; h++) {
+            const ahole = holes[h];
+            if (ShapeUtils.isClockWise(ahole)) {
+              holes[h] = ahole.reverse();
+            }
+          }
+        }
+        function mergeOverlappingPoints(points) {
+          const THRESHOLD = 1e-10;
+          const THRESHOLD_SQ = THRESHOLD * THRESHOLD;
+          let prevPos = points[0];
+          for (let i = 1; i <= points.length; i++) {
+            const currentIndex = i % points.length;
+            const currentPos = points[currentIndex];
+            const dx = currentPos.x - prevPos.x;
+            const dy = currentPos.y - prevPos.y;
+            const distSq = dx * dx + dy * dy;
+            const scalingFactorSqrt = Math.max(
+              Math.abs(currentPos.x),
+              Math.abs(currentPos.y),
+              Math.abs(prevPos.x),
+              Math.abs(prevPos.y)
+            );
+            const thresholdSqScaled = THRESHOLD_SQ * scalingFactorSqrt * scalingFactorSqrt;
+            if (distSq <= thresholdSqScaled) {
+              points.splice(currentIndex, 1);
+              i--;
+              continue;
+            }
+            prevPos = currentPos;
+          }
+        }
+        mergeOverlappingPoints(vertices);
+        holes.forEach(mergeOverlappingPoints);
+        const numHoles = holes.length;
+        const contour = vertices;
+        for (let h = 0; h < numHoles; h++) {
+          const ahole = holes[h];
+          vertices = vertices.concat(ahole);
+        }
+        function scalePt2(pt, vec, size) {
+          if (!vec) error("ExtrudeGeometry: vec does not exist");
+          return pt.clone().addScaledVector(vec, size);
+        }
+        const vlen = vertices.length;
+        function getBevelVec(inPt, inPrev, inNext) {
+          let v_trans_x, v_trans_y, shrink_by;
+          const v_prev_x = inPt.x - inPrev.x, v_prev_y = inPt.y - inPrev.y;
+          const v_next_x = inNext.x - inPt.x, v_next_y = inNext.y - inPt.y;
+          const v_prev_lensq = v_prev_x * v_prev_x + v_prev_y * v_prev_y;
+          const collinear0 = v_prev_x * v_next_y - v_prev_y * v_next_x;
+          if (Math.abs(collinear0) > Number.EPSILON) {
+            const v_prev_len = Math.sqrt(v_prev_lensq);
+            const v_next_len = Math.sqrt(v_next_x * v_next_x + v_next_y * v_next_y);
+            const ptPrevShift_x = inPrev.x - v_prev_y / v_prev_len;
+            const ptPrevShift_y = inPrev.y + v_prev_x / v_prev_len;
+            const ptNextShift_x = inNext.x - v_next_y / v_next_len;
+            const ptNextShift_y = inNext.y + v_next_x / v_next_len;
+            const sf = ((ptNextShift_x - ptPrevShift_x) * v_next_y - (ptNextShift_y - ptPrevShift_y) * v_next_x) / (v_prev_x * v_next_y - v_prev_y * v_next_x);
+            v_trans_x = ptPrevShift_x + v_prev_x * sf - inPt.x;
+            v_trans_y = ptPrevShift_y + v_prev_y * sf - inPt.y;
+            const v_trans_lensq = v_trans_x * v_trans_x + v_trans_y * v_trans_y;
+            if (v_trans_lensq <= 2) {
+              return new Vector2(v_trans_x, v_trans_y);
+            } else {
+              shrink_by = Math.sqrt(v_trans_lensq / 2);
+            }
+          } else {
+            let direction_eq = false;
+            if (v_prev_x > Number.EPSILON) {
+              if (v_next_x > Number.EPSILON) {
+                direction_eq = true;
+              }
+            } else {
+              if (v_prev_x < -Number.EPSILON) {
+                if (v_next_x < -Number.EPSILON) {
+                  direction_eq = true;
+                }
+              } else {
+                if (Math.sign(v_prev_y) === Math.sign(v_next_y)) {
+                  direction_eq = true;
+                }
+              }
+            }
+            if (direction_eq) {
+              v_trans_x = -v_prev_y;
+              v_trans_y = v_prev_x;
+              shrink_by = Math.sqrt(v_prev_lensq);
+            } else {
+              v_trans_x = v_prev_x;
+              v_trans_y = v_prev_y;
+              shrink_by = Math.sqrt(v_prev_lensq / 2);
+            }
+          }
+          return new Vector2(v_trans_x / shrink_by, v_trans_y / shrink_by);
+        }
+        const contourMovements = [];
+        for (let i = 0, il = contour.length, j = il - 1, k = i + 1; i < il; i++, j++, k++) {
+          if (j === il) j = 0;
+          if (k === il) k = 0;
+          contourMovements[i] = getBevelVec(contour[i], contour[j], contour[k]);
+        }
+        const holesMovements = [];
+        let oneHoleMovements, verticesMovements = contourMovements.concat();
+        for (let h = 0, hl = numHoles; h < hl; h++) {
+          const ahole = holes[h];
+          oneHoleMovements = [];
+          for (let i = 0, il = ahole.length, j = il - 1, k = i + 1; i < il; i++, j++, k++) {
+            if (j === il) j = 0;
+            if (k === il) k = 0;
+            oneHoleMovements[i] = getBevelVec(ahole[i], ahole[j], ahole[k]);
+          }
+          holesMovements.push(oneHoleMovements);
+          verticesMovements = verticesMovements.concat(oneHoleMovements);
+        }
+        let faces;
+        if (bevelSegments === 0) {
+          faces = ShapeUtils.triangulateShape(contour, holes);
+        } else {
+          const contractedContourVertices = [];
+          const expandedHoleVertices = [];
+          for (let b = 0; b < bevelSegments; b++) {
+            const t = b / bevelSegments;
+            const z = bevelThickness * Math.cos(t * Math.PI / 2);
+            const bs2 = bevelSize * Math.sin(t * Math.PI / 2) + bevelOffset;
+            for (let i = 0, il = contour.length; i < il; i++) {
+              const vert = scalePt2(contour[i], contourMovements[i], bs2);
+              v(vert.x, vert.y, -z);
+              if (t === 0) contractedContourVertices.push(vert);
+            }
+            for (let h = 0, hl = numHoles; h < hl; h++) {
+              const ahole = holes[h];
+              oneHoleMovements = holesMovements[h];
+              const oneHoleVertices = [];
+              for (let i = 0, il = ahole.length; i < il; i++) {
+                const vert = scalePt2(ahole[i], oneHoleMovements[i], bs2);
+                v(vert.x, vert.y, -z);
+                if (t === 0) oneHoleVertices.push(vert);
+              }
+              if (t === 0) expandedHoleVertices.push(oneHoleVertices);
+            }
+          }
+          faces = ShapeUtils.triangulateShape(contractedContourVertices, expandedHoleVertices);
+        }
+        const flen = faces.length;
+        const bs = bevelSize + bevelOffset;
+        for (let i = 0; i < vlen; i++) {
+          const vert = bevelEnabled ? scalePt2(vertices[i], verticesMovements[i], bs) : vertices[i];
+          if (!extrudeByPath) {
+            v(vert.x, vert.y, 0);
+          } else {
+            normal.copy(splineTube.normals[0]).multiplyScalar(vert.x);
+            binormal.copy(splineTube.binormals[0]).multiplyScalar(vert.y);
+            position2.copy(extrudePts[0]).add(normal).add(binormal);
+            v(position2.x, position2.y, position2.z);
+          }
+        }
+        for (let s = 1; s <= steps; s++) {
+          for (let i = 0; i < vlen; i++) {
+            const vert = bevelEnabled ? scalePt2(vertices[i], verticesMovements[i], bs) : vertices[i];
+            if (!extrudeByPath) {
+              v(vert.x, vert.y, depth / steps * s);
+            } else {
+              normal.copy(splineTube.normals[s]).multiplyScalar(vert.x);
+              binormal.copy(splineTube.binormals[s]).multiplyScalar(vert.y);
+              position2.copy(extrudePts[s]).add(normal).add(binormal);
+              v(position2.x, position2.y, position2.z);
+            }
+          }
+        }
+        for (let b = bevelSegments - 1; b >= 0; b--) {
+          const t = b / bevelSegments;
+          const z = bevelThickness * Math.cos(t * Math.PI / 2);
+          const bs2 = bevelSize * Math.sin(t * Math.PI / 2) + bevelOffset;
+          for (let i = 0, il = contour.length; i < il; i++) {
+            const vert = scalePt2(contour[i], contourMovements[i], bs2);
+            v(vert.x, vert.y, depth + z);
+          }
+          for (let h = 0, hl = holes.length; h < hl; h++) {
+            const ahole = holes[h];
+            oneHoleMovements = holesMovements[h];
+            for (let i = 0, il = ahole.length; i < il; i++) {
+              const vert = scalePt2(ahole[i], oneHoleMovements[i], bs2);
+              if (!extrudeByPath) {
+                v(vert.x, vert.y, depth + z);
+              } else {
+                v(vert.x, vert.y + extrudePts[steps - 1].y, extrudePts[steps - 1].x + z);
+              }
+            }
+          }
+        }
+        buildLidFaces();
+        buildSideFaces();
+        function buildLidFaces() {
+          const start = verticesArray.length / 3;
+          if (bevelEnabled) {
+            let layer = 0;
+            let offset = vlen * layer;
+            for (let i = 0; i < flen; i++) {
+              const face = faces[i];
+              f3(face[2] + offset, face[1] + offset, face[0] + offset);
+            }
+            layer = steps + bevelSegments * 2;
+            offset = vlen * layer;
+            for (let i = 0; i < flen; i++) {
+              const face = faces[i];
+              f3(face[0] + offset, face[1] + offset, face[2] + offset);
+            }
+          } else {
+            for (let i = 0; i < flen; i++) {
+              const face = faces[i];
+              f3(face[2], face[1], face[0]);
+            }
+            for (let i = 0; i < flen; i++) {
+              const face = faces[i];
+              f3(face[0] + vlen * steps, face[1] + vlen * steps, face[2] + vlen * steps);
+            }
+          }
+          scope.addGroup(start, verticesArray.length / 3 - start, 0);
+        }
+        function buildSideFaces() {
+          const start = verticesArray.length / 3;
+          let layeroffset = 0;
+          sidewalls(contour, layeroffset);
+          layeroffset += contour.length;
+          for (let h = 0, hl = holes.length; h < hl; h++) {
+            const ahole = holes[h];
+            sidewalls(ahole, layeroffset);
+            layeroffset += ahole.length;
+          }
+          scope.addGroup(start, verticesArray.length / 3 - start, 1);
+        }
+        function sidewalls(contour2, layeroffset) {
+          let i = contour2.length;
+          while (--i >= 0) {
+            const j = i;
+            let k = i - 1;
+            if (k < 0) k = contour2.length - 1;
+            for (let s = 0, sl = steps + bevelSegments * 2; s < sl; s++) {
+              const slen1 = vlen * s;
+              const slen2 = vlen * (s + 1);
+              const a = layeroffset + j + slen1, b = layeroffset + k + slen1, c = layeroffset + k + slen2, d = layeroffset + j + slen2;
+              f4(a, b, c, d);
+            }
+          }
+        }
+        function v(x, y, z) {
+          placeholder.push(x);
+          placeholder.push(y);
+          placeholder.push(z);
+        }
+        function f3(a, b, c) {
+          addVertex(a);
+          addVertex(b);
+          addVertex(c);
+          const nextIndex = verticesArray.length / 3;
+          const uvs = uvgen.generateTopUV(scope, verticesArray, nextIndex - 3, nextIndex - 2, nextIndex - 1);
+          addUV(uvs[0]);
+          addUV(uvs[1]);
+          addUV(uvs[2]);
+        }
+        function f4(a, b, c, d) {
+          addVertex(a);
+          addVertex(b);
+          addVertex(d);
+          addVertex(b);
+          addVertex(c);
+          addVertex(d);
+          const nextIndex = verticesArray.length / 3;
+          const uvs = uvgen.generateSideWallUV(scope, verticesArray, nextIndex - 6, nextIndex - 3, nextIndex - 2, nextIndex - 1);
+          addUV(uvs[0]);
+          addUV(uvs[1]);
+          addUV(uvs[3]);
+          addUV(uvs[1]);
+          addUV(uvs[2]);
+          addUV(uvs[3]);
+        }
+        function addVertex(index) {
+          verticesArray.push(placeholder[index * 3 + 0]);
+          verticesArray.push(placeholder[index * 3 + 1]);
+          verticesArray.push(placeholder[index * 3 + 2]);
+        }
+        function addUV(vector2) {
+          uvArray.push(vector2.x);
+          uvArray.push(vector2.y);
+        }
+      }
+    }
+    copy(source) {
+      super.copy(source);
+      this.parameters = Object.assign({}, source.parameters);
+      return this;
+    }
+    toJSON() {
+      const data = super.toJSON();
+      const shapes = this.parameters.shapes;
+      const options = this.parameters.options;
+      return toJSON$1(shapes, options, data);
+    }
+    /**
+     * Factory method for creating an instance of this class from the given
+     * JSON object.
+     *
+     * @param {Object} data - A JSON object representing the serialized geometry.
+     * @param {Array<Shape>} shapes - An array of shapes.
+     * @return {ExtrudeGeometry} A new instance.
+     */
+    static fromJSON(data, shapes) {
+      const geometryShapes = [];
+      for (let j = 0, jl = data.shapes.length; j < jl; j++) {
+        const shape = shapes[data.shapes[j]];
+        geometryShapes.push(shape);
+      }
+      const extrudePath = data.options.extrudePath;
+      if (extrudePath !== void 0) {
+        data.options.extrudePath = new Curves[extrudePath.type]().fromJSON(extrudePath);
+      }
+      return new _ExtrudeGeometry(geometryShapes, data.options);
+    }
+  };
+  var WorldUVGenerator = {
+    generateTopUV: function(geometry, vertices, indexA, indexB, indexC) {
+      const a_x = vertices[indexA * 3];
+      const a_y = vertices[indexA * 3 + 1];
+      const b_x = vertices[indexB * 3];
+      const b_y = vertices[indexB * 3 + 1];
+      const c_x = vertices[indexC * 3];
+      const c_y = vertices[indexC * 3 + 1];
+      return [
+        new Vector2(a_x, a_y),
+        new Vector2(b_x, b_y),
+        new Vector2(c_x, c_y)
+      ];
+    },
+    generateSideWallUV: function(geometry, vertices, indexA, indexB, indexC, indexD) {
+      const a_x = vertices[indexA * 3];
+      const a_y = vertices[indexA * 3 + 1];
+      const a_z = vertices[indexA * 3 + 2];
+      const b_x = vertices[indexB * 3];
+      const b_y = vertices[indexB * 3 + 1];
+      const b_z = vertices[indexB * 3 + 2];
+      const c_x = vertices[indexC * 3];
+      const c_y = vertices[indexC * 3 + 1];
+      const c_z = vertices[indexC * 3 + 2];
+      const d_x = vertices[indexD * 3];
+      const d_y = vertices[indexD * 3 + 1];
+      const d_z = vertices[indexD * 3 + 2];
+      if (Math.abs(a_y - b_y) < Math.abs(a_x - b_x)) {
+        return [
+          new Vector2(a_x, 1 - a_z),
+          new Vector2(b_x, 1 - b_z),
+          new Vector2(c_x, 1 - c_z),
+          new Vector2(d_x, 1 - d_z)
+        ];
+      } else {
+        return [
+          new Vector2(a_y, 1 - a_z),
+          new Vector2(b_y, 1 - b_z),
+          new Vector2(c_y, 1 - c_z),
+          new Vector2(d_y, 1 - d_z)
+        ];
+      }
+    }
+  };
+  function toJSON$1(shapes, options, data) {
+    data.shapes = [];
+    if (Array.isArray(shapes)) {
+      for (let i = 0, l = shapes.length; i < l; i++) {
+        const shape = shapes[i];
+        data.shapes.push(shape.uuid);
+      }
+    } else {
+      data.shapes.push(shapes.uuid);
+    }
+    data.options = Object.assign({}, options);
+    if (options.extrudePath !== void 0) data.options.extrudePath = options.extrudePath.toJSON();
+    return data;
+  }
   var IcosahedronGeometry = class _IcosahedronGeometry extends PolyhedronGeometry {
     /**
      * Constructs a new icosahedron geometry.
@@ -15223,114 +15662,6 @@
       return new _PlaneGeometry(data.width, data.height, data.widthSegments, data.heightSegments);
     }
   };
-  var ShapeGeometry = class _ShapeGeometry extends BufferGeometry {
-    /**
-     * Constructs a new shape geometry.
-     *
-     * @param {Shape|Array<Shape>} [shapes] - A shape or an array of shapes.
-     * @param {number} [curveSegments=12] - Number of segments per shape.
-     */
-    constructor(shapes = new Shape([new Vector2(0, 0.5), new Vector2(-0.5, -0.5), new Vector2(0.5, -0.5)]), curveSegments = 12) {
-      super();
-      this.type = "ShapeGeometry";
-      this.parameters = {
-        shapes,
-        curveSegments
-      };
-      const indices = [];
-      const vertices = [];
-      const normals = [];
-      const uvs = [];
-      let groupStart = 0;
-      let groupCount = 0;
-      if (Array.isArray(shapes) === false) {
-        addShape(shapes);
-      } else {
-        for (let i = 0; i < shapes.length; i++) {
-          addShape(shapes[i]);
-          this.addGroup(groupStart, groupCount, i);
-          groupStart += groupCount;
-          groupCount = 0;
-        }
-      }
-      this.setIndex(indices);
-      this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
-      this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
-      this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
-      function addShape(shape) {
-        const indexOffset = vertices.length / 3;
-        const points = shape.extractPoints(curveSegments);
-        let shapeVertices = points.shape;
-        const shapeHoles = points.holes;
-        if (ShapeUtils.isClockWise(shapeVertices) === false) {
-          shapeVertices = shapeVertices.reverse();
-        }
-        for (let i = 0, l = shapeHoles.length; i < l; i++) {
-          const shapeHole = shapeHoles[i];
-          if (ShapeUtils.isClockWise(shapeHole) === true) {
-            shapeHoles[i] = shapeHole.reverse();
-          }
-        }
-        const faces = ShapeUtils.triangulateShape(shapeVertices, shapeHoles);
-        for (let i = 0, l = shapeHoles.length; i < l; i++) {
-          const shapeHole = shapeHoles[i];
-          shapeVertices = shapeVertices.concat(shapeHole);
-        }
-        for (let i = 0, l = shapeVertices.length; i < l; i++) {
-          const vertex2 = shapeVertices[i];
-          vertices.push(vertex2.x, vertex2.y, 0);
-          normals.push(0, 0, 1);
-          uvs.push(vertex2.x, vertex2.y);
-        }
-        for (let i = 0, l = faces.length; i < l; i++) {
-          const face = faces[i];
-          const a = face[0] + indexOffset;
-          const b = face[1] + indexOffset;
-          const c = face[2] + indexOffset;
-          indices.push(a, b, c);
-          groupCount += 3;
-        }
-      }
-    }
-    copy(source) {
-      super.copy(source);
-      this.parameters = Object.assign({}, source.parameters);
-      return this;
-    }
-    toJSON() {
-      const data = super.toJSON();
-      const shapes = this.parameters.shapes;
-      return toJSON(shapes, data);
-    }
-    /**
-     * Factory method for creating an instance of this class from the given
-     * JSON object.
-     *
-     * @param {Object} data - A JSON object representing the serialized geometry.
-     * @param {Array<Shape>} shapes - An array of shapes.
-     * @return {ShapeGeometry} A new instance.
-     */
-    static fromJSON(data, shapes) {
-      const geometryShapes = [];
-      for (let j = 0, jl = data.shapes.length; j < jl; j++) {
-        const shape = shapes[data.shapes[j]];
-        geometryShapes.push(shape);
-      }
-      return new _ShapeGeometry(geometryShapes, data.curveSegments);
-    }
-  };
-  function toJSON(shapes, data) {
-    data.shapes = [];
-    if (Array.isArray(shapes)) {
-      for (let i = 0, l = shapes.length; i < l; i++) {
-        const shape = shapes[i];
-        data.shapes.push(shape.uuid);
-      }
-    } else {
-      data.shapes.push(shapes.uuid);
-    }
-    return data;
-  }
   function cloneUniforms(src) {
     const dst = {};
     for (const u in src) {
@@ -31228,6 +31559,7 @@ void main() {
       this.plasticOffset = new Float32Array(this.vertexCount * 3);
       this.elasticSnapshot = new Float32Array(this.vertexCount * 3);
       this.elasticDecay = 0;
+      this._elasticHeld = false;
       const crackDamage = new Float32Array(this.vertexCount);
       shellGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
       this.crackDamage = crackDamage;
@@ -31303,11 +31635,14 @@ void main() {
       const dirY = -normal.y * depth;
       const dirZ = -normal.z * depth;
       if (this.materialMode === "slime") {
-        const decay = this.elasticDecay;
-        if (decay > 0 && decay < 1) {
-          for (let i = 0; i < target.length; i++) target[i] *= decay;
+        if (!this._elasticHeld) {
+          const decay = this.elasticDecay;
+          if (decay > 0 && decay < 1) {
+            for (let i = 0; i < target.length; i++) target[i] *= decay;
+          }
+          this.elasticDecay = 1;
         }
-        this.elasticDecay = 1;
+        this._elasticHeld = true;
       }
       let nearestIndex = 0;
       let nearestDist = Infinity;
@@ -31412,9 +31747,14 @@ void main() {
     /** Advances slime spring-back. Returns true if the geometry needed a GPU upload this frame. */
     update(dt) {
       let needsPositionRebuild = this._dirtyPosition;
-      if (this.elasticDecay > 0) {
+      if (this._elasticHeld) {
+        this._elasticHeld = false;
+      } else if (this.elasticDecay > 0) {
         this.elasticDecay = MathUtils.damp(this.elasticDecay, 0, ELASTIC_DECAY_LAMBDA, dt);
-        if (this.elasticDecay < 2e-3) this.elasticDecay = 0;
+        if (this.elasticDecay < 2e-3) {
+          this.elasticDecay = 0;
+          this.elasticSnapshot.fill(0);
+        }
         needsPositionRebuild = true;
       }
       if (needsPositionRebuild) {
@@ -31458,6 +31798,7 @@ void main() {
       this.plasticOffset.fill(0);
       this.elasticSnapshot.fill(0);
       this.elasticDecay = 0;
+      this._elasticHeld = false;
       this.crackDamage.fill(0);
       this.holeMask.fill(0);
       this.hasBrokenOnce = false;
@@ -31660,6 +32001,33 @@ diffuseColor.rgb = coreSample.rgb;
     clay: { transparent: false, opacity: 1, roughness: 0.55, clearcoat: 0.15, clearcoatRoughness: 0.5 },
     slime: { transparent: false, opacity: 1, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.25 }
   };
+  var SHELL_LOOK = {
+    basic: {
+      waxColor: 16249574,
+      hazeAmount: 0.45,
+      waxRoughnessBase: 0.38,
+      clearcoat: 0.35,
+      clearcoatRoughness: 0.4
+    },
+    chocolate: {
+      waxColor: 4860439,
+      hazeAmount: 0,
+      waxRoughnessBase: 0.3,
+      clearcoat: 0.6,
+      clearcoatRoughness: 0.15
+    },
+    // Plain opaque sandy-tan placeholder for now — the actual sparkly,
+    // multi-color glitter shader is a separate, follow-up piece of work (see
+    // 22_Do.md); this just gets the type selectable and correctly opaque/matte
+    // in the meantime so its sound layer (audio.js) has something to attach to.
+    sand: {
+      waxColor: 14203770,
+      hazeAmount: 0,
+      waxRoughnessBase: 0.75,
+      clearcoat: 0.1,
+      clearcoatRoughness: 0.6
+    }
+  };
   function setCoreMaterialMode(coreMaterial2, mode) {
     const look = CORE_LOOK[mode] ?? CORE_LOOK.clay;
     coreMaterial2.transparent = look.transparent;
@@ -31667,6 +32035,15 @@ diffuseColor.rgb = coreSample.rgb;
     coreMaterial2.roughness = look.roughness;
     coreMaterial2.clearcoat = look.clearcoat;
     coreMaterial2.clearcoatRoughness = look.clearcoatRoughness;
+  }
+  function setShellLook(shellMaterial2, waxType) {
+    const look = SHELL_LOOK[waxType] ?? SHELL_LOOK.basic;
+    const uniforms = shellMaterial2.userData.waxUniforms;
+    uniforms.waxColor.value.set(look.waxColor);
+    uniforms.hazeAmount.value = look.hazeAmount;
+    uniforms.waxRoughnessBase.value = look.waxRoughnessBase;
+    shellMaterial2.clearcoat = look.clearcoat;
+    shellMaterial2.clearcoatRoughness = look.clearcoatRoughness;
   }
   function setCoreTexture(coreMaterial2, shellMaterial2, texture) {
     const old = coreMaterial2.userData.waxUniforms.coreMap.value;
@@ -31794,7 +32171,9 @@ diffuseColor.rgb = coreSample.rgb;
       else shape.lineTo(x, y);
     }
     shape.closePath();
-    const geometry = new ShapeGeometry(shape);
+    const thickness = size * 0.11;
+    const geometry = new ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, curveSegments: 1 });
+    geometry.translate(0, 0, -thickness / 2);
     geometry.computeVertexNormals();
     return geometry;
   }
@@ -31805,14 +32184,14 @@ diffuseColor.rgb = coreSample.rgb;
       this.items = [];
     }
     spawn(point, normal, color, size) {
-      const randomizedSize = size * (0.5 + Math.random() * 1.3);
+      const randomizedSize = size * (0.5 + Math.random() * 1.3) * 0.8;
       const geometry = buildShardGeometry(randomizedSize);
       const material = new MeshStandardMaterial({
         color,
         roughness: 0.55,
         metalness: 0,
         side: DoubleSide,
-        // flat plane — needs to stay visible while it tumbles edge-on
+        // cheap insurance against any winding issues on the extruded side walls
         transparent: true
       });
       const mesh = new Mesh(geometry, material);
@@ -31864,6 +32243,7 @@ diffuseColor.rgb = coreSample.rgb;
         survivors.push(item);
       }
       this.items = survivors;
+      return this.items.length > 0;
     }
     reset() {
       for (const item of this.items) this._remove(item);
@@ -31930,6 +32310,23 @@ diffuseColor.rgb = coreSample.rgb;
     "sounds/freesound_community-slime-2-30099_[cut_1sec] (7).mp3",
     "sounds/freesound_community-slime-2-30099_[cut_1sec].mp3"
   ];
+  var WAX_TYPE_SOUND = {
+    chocolate: {
+      firstBreak: "sounds/freesound_community-chocolate-crunching-83286_[cut_1sec].mp3",
+      pool: [
+        "sounds/freesound_community-chocolate-crunching-83286_[cut_0sec].mp3",
+        "sounds/freesound_community-chocolate-crunching-83286_[cut_0sec] (1).mp3"
+      ]
+    },
+    sand: {
+      firstBreak: "sounds/saboteurcomics-crunching-404615_[cut_0sec] (1).mp3",
+      pool: [
+        "sounds/saboteurcomics-crunching-404615_[cut_1sec] (1).mp3",
+        "sounds/saboteurcomics-crunching-404615_[cut_1sec] (2).mp3",
+        "sounds/saboteurcomics-crunching-404615_[cut_1sec].mp3"
+      ]
+    }
+  };
   var templates = {};
   var masterVolume = 1;
   function templateForSrc(src) {
@@ -31940,18 +32337,25 @@ diffuseColor.rgb = coreSample.rgb;
     }
     return templates[src];
   }
-  function setMasterVolume(volume) {
-    masterVolume = Math.min(1, Math.max(0, volume));
-  }
-  function playMaterialSound(materialMode, strength = 1, isFirstBreak = false) {
-    if (masterVolume <= 0) return;
-    const [firstBreakSound, pool] = materialMode === "clay" ? [CLAY_FIRST_BREAK_SOUND, CLAY_SOUND_POOL] : [SLIME_FIRST_BREAK_SOUND, SLIME_SOUND_POOL];
-    const src = isFirstBreak ? firstBreakSound : pool[Math.floor(Math.random() * pool.length)];
+  function playOne(src, strength) {
     const template = templateForSrc(src);
     const clone = template.cloneNode();
     clone.volume = Math.min(1, 0.75 + (strength - 1) * 0.18) * masterVolume;
     clone.play().catch(() => {
     });
+  }
+  function setMasterVolume(volume) {
+    masterVolume = Math.min(1, Math.max(0, volume));
+  }
+  function playMaterialSound(materialMode, waxType, strength = 1, isFirstBreak = false) {
+    if (masterVolume <= 0) return;
+    const [firstBreakSound, pool] = materialMode === "clay" ? [CLAY_FIRST_BREAK_SOUND, CLAY_SOUND_POOL] : [SLIME_FIRST_BREAK_SOUND, SLIME_SOUND_POOL];
+    playOne(isFirstBreak ? firstBreakSound : pool[Math.floor(Math.random() * pool.length)], strength);
+    const waxTypeSound = WAX_TYPE_SOUND[waxType];
+    if (waxTypeSound) {
+      const src = isFirstBreak ? waxTypeSound.firstBreak : waxTypeSound.pool[Math.floor(Math.random() * waxTypeSound.pool.length)];
+      playOne(src, strength);
+    }
   }
 
   // src/ui.js
@@ -31965,13 +32369,23 @@ diffuseColor.rgb = coreSample.rgb;
       });
     });
   }
-  function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhotoRemove, onReset, onVolumeChange }) {
+  function initUI({
+    onWaxTypeChange,
+    onMaterialChange,
+    onColorChange,
+    onPhotoChange,
+    onPhotoRemove,
+    onReset,
+    onVolumeChange
+  }) {
+    wireButtonGroup("waxType", onWaxTypeChange);
     wireButtonGroup("material", onMaterialChange);
     const colorPicker = document.getElementById("color-picker");
     const photoInput = document.getElementById("photo-input");
     const removePhotoButton = document.getElementById("remove-photo");
     const photoNameLabel = document.getElementById("photo-name");
     const resetButton = document.getElementById("reset-button");
+    const quickResetButton = document.getElementById("quick-reset-button");
     const volumeSlider = document.getElementById("volume-slider");
     colorPicker.addEventListener("input", () => {
       onColorChange(colorPicker.value);
@@ -31993,6 +32407,7 @@ diffuseColor.rgb = coreSample.rgb;
       onColorChange(colorPicker.value);
     });
     resetButton.addEventListener("click", onReset);
+    quickResetButton.addEventListener("click", onReset);
     volumeSlider.addEventListener("input", () => {
       onVolumeChange(Number(volumeSlider.value) / 100);
     });
@@ -32027,9 +32442,11 @@ diffuseColor.rgb = coreSample.rgb;
   var shellMaterial = createShellMaterial();
   var fragments = new FragmentSystem(scene, groundY);
   var currentMaterialMode = "clay";
+  var currentWaxType = "basic";
   var deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
   deformable.setMaterialMode(currentMaterialMode);
   setCoreMaterialMode(coreMaterial, currentMaterialMode);
+  setShellLook(shellMaterial, "basic");
   setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
@@ -32037,47 +32454,82 @@ diffuseColor.rgb = coreSample.rgb;
     renderer,
     camera,
     getActiveMesh: () => deformable,
-    onPoke: (strength, isFirstBreak = false) => playMaterialSound(currentMaterialMode, strength, isFirstBreak),
+    onPoke: (strength, isFirstBreak = false) => playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak),
     onFragmentPop: (point, normal, radius) => {
       fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
     },
     onPressProgress: updatePressProgress
   });
+  var needsExtraRender = true;
+  function requestRender() {
+    needsExtraRender = true;
+  }
   var { initialColor } = initUI({
+    onWaxTypeChange: (waxType) => {
+      currentWaxType = waxType;
+      setShellLook(shellMaterial, waxType);
+      requestRender();
+    },
     onMaterialChange: (mode) => {
       currentMaterialMode = mode;
       deformable.setMaterialMode(mode);
       setCoreMaterialMode(coreMaterial, mode);
+      requestRender();
     },
     onColorChange: (hex) => {
       setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
+      requestRender();
     },
     onPhotoChange: async (file) => {
       const texture = await loadPhotoTexture(file);
       setCoreTexture(coreMaterial, shellMaterial, texture);
+      requestRender();
     },
     onPhotoRemove: () => {
     },
     onReset: () => {
       deformable.reset();
       fragments.reset();
+      requestRender();
     },
     onVolumeChange: (volume) => setMasterVolume(volume)
   });
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
   var lastTime = performance.now();
+  var animationFrameId = null;
   function tick() {
     const now = performance.now();
     const dt = Math.min((now - lastTime) / 1e3, 0.05);
     lastTime = now;
     pointerInteraction.update();
-    deformable.update(dt);
-    fragments.update(dt);
-    controls.update();
-    renderer.render(scene, camera);
-    requestAnimationFrame(tick);
+    const meshChanged = deformable.update(dt);
+    const fragmentsAnimating = fragments.update(dt);
+    const cameraChanged = controls.update();
+    if (meshChanged || fragmentsAnimating || cameraChanged || needsExtraRender) {
+      renderer.render(scene, camera);
+      needsExtraRender = false;
+    }
+    animationFrameId = requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
+  function stopLoop() {
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+  }
+  function startLoop() {
+    if (animationFrameId === null) {
+      lastTime = performance.now();
+      requestRender();
+      animationFrameId = requestAnimationFrame(tick);
+    }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopLoop();
+    else startLoop();
+  });
+  window.addEventListener("resize", requestRender);
+  startLoop();
 })();
 /*! Bundled license information:
 

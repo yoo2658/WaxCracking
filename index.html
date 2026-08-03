@@ -24,13 +24,25 @@
     />
   </svg>
 
-  <div id="ui">
+  <div id="ui-wrapper">
+    <button type="button" id="quick-reset-button" aria-label="새 왁스로 리셋" title="새 왁스로 리셋">↺</button>
+
+    <div id="ui">
     <div class="ui-header">
       <h1>왁스 뿌수기</h1>
       <button type="button" id="ui-toggle" aria-label="메뉴 열기/닫기">✕</button>
     </div>
 
     <div id="ui-body">
+      <section>
+        <h2>왁스 종류</h2>
+        <div class="button-row" data-group="waxType">
+          <button type="button" data-value="basic" class="active">기본</button>
+          <button type="button" data-value="chocolate">초콜릿</button>
+          <button type="button" data-value="sand">모래</button>
+        </div>
+      </section>
+
       <section>
         <h2>재질</h2>
         <div class="button-row" data-group="material">
@@ -62,6 +74,7 @@
       </section>
 
       <p class="hint">클릭한 순간부터 눌리고, 오래 누를수록 세게 눌려요. 새 왁스는 1.5초 이상 눌러야 처음 크게 갈라져요. 그 뒤로는 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
+    </div>
     </div>
   </div>
 

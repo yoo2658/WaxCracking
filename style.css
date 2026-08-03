@@ -57,12 +57,38 @@ html, body {
   transition: stroke-dashoffset 0.05s linear;
 }
 
-#ui {
+#ui-wrapper {
   position: fixed;
   top: 20px;
   right: 20px;
-  width: 260px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   max-width: calc(100vw - 40px);
+}
+
+#quick-reset-button {
+  flex-shrink: 0;
+  /* Square, one side = #ui's own height when collapsed (18px padding top/bottom + 32px header). */
+  width: 68px;
+  height: 68px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(20, 22, 28, 0.72);
+  backdrop-filter: blur(10px);
+  color: #eef0f4;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#quick-reset-button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#ui {
+  width: 260px;
+  min-width: 0;
   padding: 18px;
   border-radius: 16px;
   background: rgba(20, 22, 28, 0.72);

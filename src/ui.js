@@ -9,7 +9,16 @@ function wireButtonGroup(groupName, onSelect) {
   });
 }
 
-export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhotoRemove, onReset, onVolumeChange }) {
+export function initUI({
+  onWaxTypeChange,
+  onMaterialChange,
+  onColorChange,
+  onPhotoChange,
+  onPhotoRemove,
+  onReset,
+  onVolumeChange,
+}) {
+  wireButtonGroup('waxType', onWaxTypeChange);
   wireButtonGroup('material', onMaterialChange);
 
   const colorPicker = document.getElementById('color-picker');
@@ -17,6 +26,7 @@ export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhoto
   const removePhotoButton = document.getElementById('remove-photo');
   const photoNameLabel = document.getElementById('photo-name');
   const resetButton = document.getElementById('reset-button');
+  const quickResetButton = document.getElementById('quick-reset-button');
   const volumeSlider = document.getElementById('volume-slider');
 
   colorPicker.addEventListener('input', () => {
@@ -44,6 +54,7 @@ export function initUI({ onMaterialChange, onColorChange, onPhotoChange, onPhoto
   });
 
   resetButton.addEventListener('click', onReset);
+  quickResetButton.addEventListener('click', onReset);
 
   volumeSlider.addEventListener('input', () => {
     onVolumeChange(Number(volumeSlider.value) / 100);

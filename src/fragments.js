@@ -5,8 +5,9 @@ const MAX_FRAGMENTS = 24;
 const LAND_LINGER_SECONDS = 1.0; // how long a landed fragment stays before fading
 const FADE_SECONDS = 0.5;
 
-// A flat, irregular chip — 3 to 6 sides, jittered radius — rather than a
-// solid 3D chunk, so falling debris reads as a thin broken wax flake.
+// An irregular chip — 3 to 6 sides, jittered radius — extruded with a
+// little real depth so it reads as a solid broken chunk rather than a
+// paper-thin flake, while still thin enough to look like broken shell.
 function buildShardGeometry(size) {
   const sides = 3 + Math.floor(Math.random() * 4);
   const shape = new THREE.Shape();
@@ -20,7 +21,9 @@ function buildShardGeometry(size) {
   }
   shape.closePath();
 
-  const geometry = new THREE.ShapeGeometry(shape);
+  const thickness = size * 0.11;
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, curveSegments: 1 });
+  geometry.translate(0, 0, -thickness / 2); // center on its own local origin, matching the old flat shape
   geometry.computeVertexNormals();
   return geometry;
 }
@@ -28,10 +31,10 @@ function buildShardGeometry(size) {
 /**
  * Small pool of debris meshes that pop off the wax shell, tumble under
  * gravity, rest on a ground plane, then fade out and disappear after a
- * moment rather than piling up. Purely a cosmetic approximation (a flat
- * jittered polygon, not an exact cut of the shell's Voronoi cell) — good
- * enough for the "a chunk breaks off and falls" payoff without mesh boolean
- * surgery.
+ * moment rather than piling up. Purely a cosmetic approximation (a jittered
+ * polygon extruded with a bit of depth, not an exact cut of the shell's
+ * Voronoi cell) — good enough for the "a chunk breaks off and falls" payoff
+ * without mesh boolean surgery.
  */
 export class FragmentSystem {
   constructor(scene, groundY) {
@@ -42,14 +45,16 @@ export class FragmentSystem {
 
   spawn(point, normal, color, size) {
     // Vary the overall chip size, not just its jagged outline — otherwise
-    // every pop reads as the same uniform-sized chunk breaking off.
-    const randomizedSize = size * (0.5 + Math.random() * 1.3);
+    // every pop reads as the same uniform-sized chunk breaking off. The
+    // whole range is scaled down 0.8x from its original span (was up to 1.8x
+    // size, now up to 1.44x) — the biggest chunks read as too large.
+    const randomizedSize = size * (0.5 + Math.random() * 1.3) * 0.8;
     const geometry = buildShardGeometry(randomizedSize);
     const material = new THREE.MeshStandardMaterial({
       color,
       roughness: 0.55,
       metalness: 0,
-      side: THREE.DoubleSide, // flat plane — needs to stay visible while it tumbles edge-on
+      side: THREE.DoubleSide, // cheap insurance against any winding issues on the extruded side walls
       transparent: true,
     });
     const mesh = new THREE.Mesh(geometry, material);
@@ -110,6 +115,7 @@ export class FragmentSystem {
       survivors.push(item);
     }
     this.items = survivors;
+    return this.items.length > 0; // lets the main loop skip rendering once there's nothing left to animate
   }
 
   reset() {
