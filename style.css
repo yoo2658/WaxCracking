@@ -31,30 +31,29 @@ html, body {
   cursor: grabbing;
 }
 
-/* Fills in over the fresh wax's hold-to-break window — the wax itself stays
-   deliberately still and silent through that wait, so this is the only cue
-   that the press registered and is building up. Positioned at the press
-   point each frame from JS; hidden the rest of the time. */
-#press-progress {
+/* A brief, self-dismissing hint (e.g. "press and hold to break it") — shown
+   after a few taps that let go too soon, see ui.js's showToast(). */
+#toast {
   position: fixed;
-  left: 0;
-  top: 0;
-  width: 64px;
-  height: 64px;
-  margin-left: -32px;
-  margin-top: -32px;
-  pointer-events: none;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 40px);
+  padding: 12px 20px;
+  border-radius: 12px;
+  background: rgba(20, 22, 28, 0.88);
+  backdrop-filter: blur(10px);
+  color: #eef0f4;
+  font-size: 14px;
+  text-align: center;
   opacity: 0;
-  transition: opacity 0.15s ease;
-  z-index: 5;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+  z-index: 10;
 }
 
-#press-progress.visible {
+#toast.visible {
   opacity: 1;
-}
-
-#press-progress-fill {
-  transition: stroke-dashoffset 0.05s linear;
 }
 
 #ui-wrapper {

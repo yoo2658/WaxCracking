@@ -31514,11 +31514,11 @@ void main() {
   var POKE_DEPTH_RATIO_OF_MAX = 0.72;
   var CRACK_RATE_PER_HIT = 0.55;
   var ELASTIC_DECAY_LAMBDA = 2.6;
-  var BREAK_DAMAGE_THRESHOLD = 0.95;
+  var BREAK_DAMAGE_THRESHOLD = 0.5;
   var HOLE_RADIUS_RATIO = 0.7;
   var FRAGMENT_RADIUS_RATIO = 0.18;
   var FIRST_BREAK_HOLD_SECONDS = 1.5;
-  var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 2.5;
+  var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25;
   var SHELL_THICKNESS_RATIO = 0.07;
   var BULGE_RISE_START_RATIO = 0.6;
   var BULGE_PEAK_RATIO = 1;
@@ -31689,7 +31689,6 @@ void main() {
       if (!this.hasBrokenOnce) {
         if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
         this.hasBrokenOnce = true;
-        this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 1;
         this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
         this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
         return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
@@ -31802,7 +31801,6 @@ void main() {
       this.crackDamage.fill(0);
       this.holeMask.fill(0);
       this.hasBrokenOnce = false;
-      this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 0;
       this._rebuildPositions();
       this.shellGeometry.attributes.crackDamage.needsUpdate = true;
       this.shellGeometry.attributes.holeMask.needsUpdate = true;
@@ -31922,7 +31920,6 @@ uniform float waxRoughnessBase;
 uniform sampler2D coreMap;
 uniform float projectionScale;
 uniform float hazeAmount;
-uniform float hasBrokenOnce;
 uniform float sparkleAmount;
 ${NOISE}
 `;
@@ -31931,7 +31928,7 @@ vec2 waxVoronoiSample = waxVoronoi(vObjectPosition * crackCellFrequency);
 float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
 
 float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
-float crackSpread = smoothstep(0.0, 0.3, vCrackDamage) * hasBrokenOnce;
+float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
 float crack = crackLine * crackSpread * (1.0 - vHoleMask);
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
@@ -32023,7 +32020,6 @@ diffuseColor.rgb = coreSample.rgb;
       coreMap: { value: makeDefaultCoreTexture() },
       projectionScale: { value: 1 },
       hazeAmount: { value: 0.45 },
-      hasBrokenOnce: { value: 0 },
       sparkleAmount: { value: 0 }
     };
     const material = new MeshPhysicalMaterial({
@@ -32135,17 +32131,18 @@ diffuseColor.rgb = coreSample.rgb;
 
   // src/pointer-interaction.js
   var TAP_MAX_MOVEMENT_PX = 6;
-  var MIN_HOLD_STRENGTH = 1;
-  var MAX_HOLD_STRENGTH = 2.4;
+  var MIN_HOLD_STRENGTH = 0.5;
+  var MAX_HOLD_STRENGTH = 1.2;
   var HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
   var PointerInteraction = class {
-    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress }) {
+    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap }) {
       this.renderer = renderer2;
       this.camera = camera2;
       this.getActiveMesh = getActiveMesh;
       this.onPoke = onPoke;
       this.onFragmentPop = onFragmentPop;
       this.onPressProgress = onPressProgress;
+      this.onShortTap = onShortTap;
       this.raycaster = new Raycaster();
       this.ndc = new Vector2();
       this.active = null;
@@ -32195,6 +32192,10 @@ diffuseColor.rgb = coreSample.rgb;
     _onUp = () => {
       if (this.active && !this.active.soundPlayed) {
         this.onPoke?.(this._currentStrength(this.active));
+        const mesh = this.getActiveMesh();
+        if (mesh && !mesh.hasBrokenOnce) {
+          this.onShortTap?.();
+        }
       }
       this.active = null;
       this.onPressProgress?.(null);
@@ -32214,15 +32215,15 @@ diffuseColor.rgb = coreSample.rgb;
         return;
       }
       const holdSeconds = (performance.now() - active.startTime) / 1e3;
-      if (!mesh.hasBrokenOnce) {
-        this.onPressProgress?.(active.downX, active.downY, Math.min(holdSeconds / FIRST_BREAK_HOLD_SECONDS, 1));
-        if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
-        this.onPressProgress?.(null);
-      }
       const targetStrength = this._currentStrength(active);
       const delta = Math.max(targetStrength - active.appliedStrength, 0);
       const fragmentSpawn = mesh.poke(active.point, active.normal, delta, holdSeconds);
       active.appliedStrength = targetStrength;
+      if (mesh.hasBrokenOnce) {
+        this.onPressProgress?.(null);
+      } else {
+        this.onPressProgress?.(active.downX, active.downY, Math.min(holdSeconds / FIRST_BREAK_HOLD_SECONDS, 1));
+      }
       if (fragmentSpawn) {
         active.soundPlayed = true;
         this.onPoke?.(targetStrength, fragmentSpawn.isFirstBreak);
@@ -32497,24 +32498,50 @@ diffuseColor.rgb = coreSample.rgb;
     });
     return { initialColor: colorPicker.value };
   }
-  var PRESS_PROGRESS_CIRCUMFERENCE = 163.36;
-  function updatePressProgress(x, y, progress) {
-    const svg = document.getElementById("press-progress");
-    if (x === null) {
-      svg.classList.remove("visible");
-      return;
+  var TOAST_DURATION_MS = 2600;
+  var toastTimeoutId = null;
+  function showToast(message) {
+    const toast = document.getElementById("toast");
+    toast.textContent = message;
+    toast.classList.add("visible");
+    if (toastTimeoutId) clearTimeout(toastTimeoutId);
+    toastTimeoutId = setTimeout(() => {
+      toast.classList.remove("visible");
+      toastTimeoutId = null;
+    }, TOAST_DURATION_MS);
+  }
+
+  // src/camera-effects.js
+  var ZOOM_FOV_RATIO = 0.85;
+  var SHAKE_AMOUNT = 0.028;
+  var SHAKE_BASE_FRACTION = 0.4;
+  var SMOOTHING_LAMBDA = 8;
+  var smoothedAnticipation = 0;
+  function applyPressAnticipation(camera2, baseFov2, targetAnticipation, dt) {
+    smoothedAnticipation = MathUtils.damp(smoothedAnticipation, targetAnticipation, SMOOTHING_LAMBDA, dt);
+    if (smoothedAnticipation < 1e-3) smoothedAnticipation = 0;
+    let changed = false;
+    const targetFov = MathUtils.lerp(baseFov2, baseFov2 * ZOOM_FOV_RATIO, smoothedAnticipation);
+    if (camera2.fov !== targetFov) {
+      camera2.fov = targetFov;
+      camera2.updateProjectionMatrix();
+      changed = true;
     }
-    svg.style.left = `${x}px`;
-    svg.style.top = `${y}px`;
-    document.getElementById("press-progress-fill").style.strokeDashoffset = String(
-      PRESS_PROGRESS_CIRCUMFERENCE * (1 - progress)
-    );
-    svg.classList.add("visible");
+    if (targetAnticipation > 0) {
+      const shakeStrength = SHAKE_BASE_FRACTION + (1 - SHAKE_BASE_FRACTION) * targetAnticipation;
+      const shake = SHAKE_AMOUNT * shakeStrength;
+      camera2.position.x += (Math.random() - 0.5) * shake;
+      camera2.position.y += (Math.random() - 0.5) * shake;
+      camera2.position.z += (Math.random() - 0.5) * shake;
+      changed = true;
+    }
+    return changed;
   }
 
   // src/main.js
   var canvas = document.getElementById("scene-canvas");
   var { renderer, scene, camera, controls, groundY } = createScene(canvas);
+  var baseFov = camera.fov;
   var coreMaterial = createCoreMaterial();
   var shellMaterial = createShellMaterial();
   var fragments = new FragmentSystem(scene, groundY);
@@ -32527,6 +32554,9 @@ diffuseColor.rgb = coreSample.rgb;
   setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
+  var pressAnticipation = 0;
+  var SHORT_TAP_HINT_THRESHOLD = 3;
+  var shortTapCount = 0;
   var pointerInteraction = new PointerInteraction({
     renderer,
     camera,
@@ -32535,7 +32565,20 @@ diffuseColor.rgb = coreSample.rgb;
     onFragmentPop: (point, normal, radius) => {
       fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
     },
-    onPressProgress: updatePressProgress
+    // x is only ever passed as null to mean "hide/reset" (release, drag, or the
+    // break itself) — see pointer-interaction.js. The screen coordinates
+    // (x, y) aren't needed here since this drives a camera effect, not
+    // something positioned on screen.
+    onPressProgress: (x, y, progress) => {
+      pressAnticipation = x === null ? 0 : progress;
+    },
+    onShortTap: () => {
+      shortTapCount += 1;
+      if (shortTapCount >= SHORT_TAP_HINT_THRESHOLD) {
+        showToast("\uAC15\uD558\uAC8C \uB20C\uB7EC\uC11C \uC641\uC2A4\uB97C \uAE68\uC8FC\uC138\uC694.");
+        shortTapCount = 0;
+      }
+    }
   });
   var needsExtraRender = true;
   function requestRender() {
@@ -32567,6 +32610,7 @@ diffuseColor.rgb = coreSample.rgb;
     onReset: () => {
       deformable.reset();
       fragments.reset();
+      shortTapCount = 0;
       requestRender();
     },
     onVolumeChange: (volume) => setMasterVolume(volume)
@@ -32582,7 +32626,8 @@ diffuseColor.rgb = coreSample.rgb;
     const meshChanged = deformable.update(dt);
     const fragmentsAnimating = fragments.update(dt);
     const cameraChanged = controls.update();
-    if (meshChanged || fragmentsAnimating || cameraChanged || needsExtraRender) {
+    const pressEffectActive = applyPressAnticipation(camera, baseFov, pressAnticipation, dt);
+    if (meshChanged || fragmentsAnimating || cameraChanged || pressEffectActive || needsExtraRender) {
       renderer.render(scene, camera);
       needsExtraRender = false;
     }

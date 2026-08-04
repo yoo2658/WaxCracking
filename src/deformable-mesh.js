@@ -4,11 +4,11 @@ const MAX_PLASTIC_DISPLACEMENT_RATIO = 0.32;
 const POKE_DEPTH_RATIO_OF_MAX = 0.72; // poke depth relative to maxDisplacement, kept < 1 so thin shapes don't punch through
 const CRACK_RATE_PER_HIT = 0.55;
 const ELASTIC_DECAY_LAMBDA = 2.6; // lower = slower, gooier slime spring-back
-const BREAK_DAMAGE_THRESHOLD = 0.95; // crackDamage level (post-first-break) at which a chunk actually pops loose — reached by roughly two full-strength pokes at the same spot, continuous hold or separate taps alike
+const BREAK_DAMAGE_THRESHOLD = 0.5; // crackDamage level (post-first-break) at which a chunk actually pops loose — reached by roughly two full-strength pokes at the same spot, continuous hold or separate taps alike. Halved from 0.95 to match MIN/MAX_HOLD_STRENGTH also being halved in pointer-interaction.js — otherwise the same "about two pokes" would've needed roughly twice as many now that each poke applies half the force.
 const HOLE_RADIUS_RATIO = 0.7; // how much of the shell opens up per popped chunk. The smoothstep falloff below means the actual visible opening (where the interpolated mask crosses the 0.5 discard threshold) is roughly half of this ratio's radius
 const FRAGMENT_RADIUS_RATIO = 0.18; // size of the falling debris shard — deliberately much smaller than HOLE_RADIUS_RATIO, since a huge chunk flying off every hit read as excessive
-export const FIRST_BREAK_HOLD_SECONDS = 1.5; // a pristine, never-yet-broken wax needs one sustained press this long before it cracks open at all — like the real first crack of a fresh wax shell
-const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 2.5; // the payoff for that first sustained press is a dramatically wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area
+export const FIRST_BREAK_HOLD_SECONDS = 1.5; // a pristine, never-yet-broken wax needs one sustained press this long before its first dramatic break (wide crack burst + hole + fragment) — it still dents and cracks a little from the very first instant of any press, same as later ones, this just withholds the big payoff
+const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25; // the payoff for that first sustained press is a wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area. Halved from 2.5 per feedback that the crack spread felt too wide.
 
 const SHELL_THICKNESS_RATIO = 0.07; // wax coating thickness, as a fraction of shape radius
 
@@ -45,8 +45,10 @@ const BULGE_STRENGTH = 0.5;
  * the poked spot crosses BREAK_DAMAGE_THRESHOLD (roughly two full-strength
  * pokes there, whether from separate taps or one continuous hold — see
  * poke()), but a wax that has never broken at all needs one single
- * sustained FIRST_BREAK_HOLD_SECONDS-long press first, rewarded with an
- * oversized first break.
+ * sustained FIRST_BREAK_HOLD_SECONDS-long press before its first break,
+ * which is rewarded with a much wider crack burst than usual (the actual
+ * hole/fragment size is unchanged) — it still visibly dents and cracks a
+ * little the whole time it's building up to that, same as any later press.
  *
  * Both meshes are kept at an identity transform (no rotation/translation/
  * scale) for their whole lifetime, so raycast hit points in world space can
@@ -118,7 +120,7 @@ export class DeformableMesh {
 
     this._dirtyPosition = false;
     this._dirtyAttributes = false;
-    this.hasBrokenOnce = false; // a pristine wax needs one sustained 3s press before anything cracks open at all
+    this.hasBrokenOnce = false; // a pristine wax needs one sustained FIRST_BREAK_HOLD_SECONDS press before its first dramatic break (see FIRST_BREAK_HOLD_SECONDS above)
   }
 
   setMaterialMode(mode) {
@@ -260,7 +262,6 @@ export class DeformableMesh {
     if (!this.hasBrokenOnce) {
       if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
       this.hasBrokenOnce = true;
-      this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 1; // un-gates all crack-line visibility in the shell shader
       // The dramatic payoff is a crack network radiating out far wider than
       // an ordinary break — but the actual hole/fragment stay normal-sized,
       // so the wax reads as "it just cracked all over" rather than "a huge
@@ -400,7 +401,6 @@ export class DeformableMesh {
     this.crackDamage.fill(0);
     this.holeMask.fill(0);
     this.hasBrokenOnce = false;
-    this.mesh.material.userData.waxUniforms.hasBrokenOnce.value = 0;
     this._rebuildPositions();
     this.shellGeometry.attributes.crackDamage.needsUpdate = true;
     this.shellGeometry.attributes.holeMask.needsUpdate = true;

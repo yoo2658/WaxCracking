@@ -45,7 +45,6 @@ export function createShellMaterial() {
     coreMap: { value: makeDefaultCoreTexture() },
     projectionScale: { value: 1 },
     hazeAmount: { value: 0.45 },
-    hasBrokenOnce: { value: 0 },
     sparkleAmount: { value: 0 },
   };
 

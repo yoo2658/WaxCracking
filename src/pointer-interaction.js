@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { FIRST_BREAK_HOLD_SECONDS } from './deformable-mesh.js';
 
 const TAP_MAX_MOVEMENT_PX = 6;
-const MIN_HOLD_STRENGTH = 1;
-const MAX_HOLD_STRENGTH = 2.4;
+const MIN_HOLD_STRENGTH = 0.5; // halved from 1 per feedback that presses felt too forceful
+const MAX_HOLD_STRENGTH = 1.2; // halved from 2.4, same reason
 const HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
 
 /**
@@ -16,13 +16,14 @@ const HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
  * same gesture, it just stops feeding the mesh once a drag is detected.
  */
 export class PointerInteraction {
-  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress }) {
+  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap }) {
     this.renderer = renderer;
     this.camera = camera;
     this.getActiveMesh = getActiveMesh;
     this.onPoke = onPoke;
     this.onFragmentPop = onFragmentPop;
     this.onPressProgress = onPressProgress;
+    this.onShortTap = onShortTap;
 
     this.raycaster = new THREE.Raycaster();
     this.ndc = new THREE.Vector2();
@@ -95,6 +96,15 @@ export class PointerInteraction {
     // played its own sound in sync the moment it happened, mid-hold or not.
     if (this.active && !this.active.soundPlayed) {
       this.onPoke?.(this._currentStrength(this.active));
+
+      // Releasing before a still-pristine wax has ever had its first
+      // dramatic break (see hasBrokenOnce in deformable-mesh.js) means this
+      // was a tap that let go too soon — repeated instances of that suggest
+      // the player doesn't realize they need to hold it, not just click.
+      const mesh = this.getActiveMesh();
+      if (mesh && !mesh.hasBrokenOnce) {
+        this.onShortTap?.();
+      }
     }
     this.active = null;
     this.onPressProgress?.(null);
@@ -119,28 +129,27 @@ export class PointerInteraction {
 
     const holdSeconds = (performance.now() - active.startTime) / 1000;
 
-    // A wax that has never broken at all stays completely rigid — no dent,
-    // no bulge, no crack — for the whole first-break hold: poke() isn't
-    // called at all yet, so nothing in the mesh moves. appliedStrength stays
-    // at 0 through this entire window, so the moment the gate opens, the
-    // very next call's delta is the FULL plateaued strength, not just that
-    // frame's sliver — the press "gives way" all at once instead of finishing
-    // off a dent that was already most of the way there.
-    if (!mesh.hasBrokenOnce) {
-      // The wax itself stays silent and unmoving through this whole wait, so
-      // without some other cue it's easy to think the press didn't register
-      // at all — a small on-screen ring fills up instead, independent of the
-      // wax's own (deliberately blank) visual state.
-      this.onPressProgress?.(active.downX, active.downY, Math.min(holdSeconds / FIRST_BREAK_HOLD_SECONDS, 1));
-      if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return;
-      this.onPressProgress?.(null);
-    }
-
+    // A wax that has never broken at all now dents and cracks a little from
+    // the very first instant of a press, same as any later one — poke() runs
+    // every frame regardless. deformable-mesh.js's own _checkBreak still
+    // withholds the actual dramatic payoff (a wide crack burst, the hole,
+    // and the falling fragment) until this hold has lasted FIRST_BREAK_HOLD_SECONDS,
+    // so a light tap still won't shatter it — it just means a fresh wax isn't
+    // completely rigid/silent while you're building up to that first break.
     const targetStrength = this._currentStrength(active);
     const delta = Math.max(targetStrength - active.appliedStrength, 0);
 
     const fragmentSpawn = mesh.poke(active.point, active.normal, delta, holdSeconds);
     active.appliedStrength = targetStrength;
+
+    // The camera zoom/shake anticipation cue (see camera-effects.js) only
+    // matters while building up to a wax's first-ever dramatic break — once
+    // that's happened (just now, or on some earlier press), hide it.
+    if (mesh.hasBrokenOnce) {
+      this.onPressProgress?.(null);
+    } else {
+      this.onPressProgress?.(active.downX, active.downY, Math.min(holdSeconds / FIRST_BREAK_HOLD_SECONDS, 1));
+    }
 
     if (fragmentSpawn) {
       active.soundPlayed = true;

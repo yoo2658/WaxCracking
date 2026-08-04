@@ -131,7 +131,6 @@ uniform float waxRoughnessBase;
 uniform sampler2D coreMap;
 uniform float projectionScale;
 uniform float hazeAmount;
-uniform float hasBrokenOnce;
 uniform float sparkleAmount;
 ${NOISE}
 `;
@@ -146,19 +145,17 @@ ${NOISE}
 // independent and much fainter — a constant, blurry ambient hint, not a
 // damage readout.
 //
-// hasBrokenOnce (0 until the wax's one-time 3-second first break, see
-// deformable-mesh.js) hard-gates ALL crack-line visibility: crackDamage
-// still silently accumulates underneath during that first press so the
-// eventual break isn't computed from nothing, but nothing should be visibly
-// cracked or see-through before that first dramatic break actually happens —
-// otherwise a fresh, still-intact-looking wax reads as already crumbling
-// the instant it's clicked, well before the 3-second payoff.
+// A fresh, never-yet-broken wax now cracks a little from the very first
+// instant of a press, same as any later one (see pointer-interaction.js) —
+// the dramatic payoff withheld until FIRST_BREAK_HOLD_SECONDS is the actual
+// hole/fragment/wide crack burst (deformable-mesh.js's _checkBreak), not the
+// crack line's visibility itself.
 export const SHELL_FRAGMENT_COLOR = `#include <color_fragment>
 vec2 waxVoronoiSample = waxVoronoi(vObjectPosition * crackCellFrequency);
 float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
 
 float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
-float crackSpread = smoothstep(0.0, 0.3, vCrackDamage) * hasBrokenOnce;
+float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
 float crack = crackLine * crackSpread * (1.0 - vHoleMask);
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);

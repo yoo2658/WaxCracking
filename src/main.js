@@ -13,10 +13,12 @@ import { PointerInteraction } from './pointer-interaction.js';
 import { FragmentSystem } from './fragments.js';
 import { loadPhotoTexture, makeColorTexture } from './texture-loader.js';
 import { playMaterialSound, setMasterVolume } from './audio.js';
-import { initUI, updatePressProgress } from './ui.js';
+import { initUI, showToast } from './ui.js';
+import { applyPressAnticipation } from './camera-effects.js';
 
 const canvas = document.getElementById('scene-canvas');
 const { renderer, scene, camera, controls, groundY } = createScene(canvas);
+const baseFov = camera.fov;
 
 const coreMaterial = createCoreMaterial();
 const shellMaterial = createShellMaterial();
@@ -32,6 +34,13 @@ setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
 scene.add(deformable.coreMesh);
 scene.add(deformable.mesh);
 
+let pressAnticipation = 0;
+
+// After a few taps that let go before a fresh wax's first dramatic break,
+// nudge the player toward holding it down instead of just clicking.
+const SHORT_TAP_HINT_THRESHOLD = 3;
+let shortTapCount = 0;
+
 const pointerInteraction = new PointerInteraction({
   renderer,
   camera,
@@ -40,7 +49,20 @@ const pointerInteraction = new PointerInteraction({
   onFragmentPop: (point, normal, radius) => {
     fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
   },
-  onPressProgress: updatePressProgress,
+  // x is only ever passed as null to mean "hide/reset" (release, drag, or the
+  // break itself) — see pointer-interaction.js. The screen coordinates
+  // (x, y) aren't needed here since this drives a camera effect, not
+  // something positioned on screen.
+  onPressProgress: (x, y, progress) => {
+    pressAnticipation = x === null ? 0 : progress;
+  },
+  onShortTap: () => {
+    shortTapCount += 1;
+    if (shortTapCount >= SHORT_TAP_HINT_THRESHOLD) {
+      showToast('강하게 눌러서 왁스를 깨주세요.');
+      shortTapCount = 0;
+    }
+  },
 });
 
 // Set once whenever something outside the per-frame animation checks below
@@ -78,6 +100,7 @@ const { initialColor } = initUI({
   onReset: () => {
     deformable.reset();
     fragments.reset();
+    shortTapCount = 0;
     requestRender();
   },
   onVolumeChange: (volume) => setMasterVolume(volume),
@@ -99,15 +122,15 @@ function tick() {
 
   pointerInteraction.update();
   // Each already tracks whether it actually changed anything this frame —
-  // reuse that instead of redrawing on every tick regardless. A held press
-  // during a fresh wax's silent hold-to-break wait, for instance, changes
-  // nothing in the 3D scene at all (by design) until it breaks, so there's
-  // nothing worth (re-)rendering for as long as the camera isn't moving either.
+  // reuse that instead of redrawing on every tick regardless.
   const meshChanged = deformable.update(dt);
   const fragmentsAnimating = fragments.update(dt);
   const cameraChanged = controls.update();
+  // Applied after controls.update() so OrbitControls' own damped position
+  // isn't immediately overwritten by this frame's shake offset.
+  const pressEffectActive = applyPressAnticipation(camera, baseFov, pressAnticipation, dt);
 
-  if (meshChanged || fragmentsAnimating || cameraChanged || needsExtraRender) {
+  if (meshChanged || fragmentsAnimating || cameraChanged || pressEffectActive || needsExtraRender) {
     renderer.render(scene, camera);
     needsExtraRender = false;
   }
