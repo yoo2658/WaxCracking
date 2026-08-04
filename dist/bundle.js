@@ -31519,6 +31519,7 @@ void main() {
   var FRAGMENT_RADIUS_RATIO = 0.18;
   var FIRST_BREAK_HOLD_SECONDS = 1.5;
   var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25;
+  var REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9;
   var SHELL_THICKNESS_RATIO = 0.07;
   var BULGE_RISE_START_RATIO = 0.6;
   var BULGE_PEAK_RATIO = 1;
@@ -31694,6 +31695,7 @@ void main() {
         return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
       }
       if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
+      this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
       this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
       return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
     }

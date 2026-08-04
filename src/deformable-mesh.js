@@ -9,6 +9,7 @@ const HOLE_RADIUS_RATIO = 0.7; // how much of the shell opens up per popped chun
 const FRAGMENT_RADIUS_RATIO = 0.18; // size of the falling debris shard — deliberately much smaller than HOLE_RADIUS_RATIO, since a huge chunk flying off every hit read as excessive
 export const FIRST_BREAK_HOLD_SECONDS = 1.5; // a pristine, never-yet-broken wax needs one sustained press this long before its first dramatic break (wide crack burst + hole + fragment) — it still dents and cracks a little from the very first instant of any press, same as later ones, this just withholds the big payoff
 const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25; // the payoff for that first sustained press is a wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area. Halved from 2.5 per feedback that the crack spread felt too wide.
+const REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9; // every later break also gets a modest crack-spread halo around its hole — without this, a regular break only had whatever crackDamage the poke() hits themselves happened to leave nearby (a much smaller radius), so the area around a fresh hole looked almost uncracked.
 
 const SHELL_THICKNESS_RATIO = 0.07; // wax coating thickness, as a fraction of shape radius
 
@@ -272,6 +273,7 @@ export class DeformableMesh {
     }
 
     if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
+    this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
     this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
     return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
   }
