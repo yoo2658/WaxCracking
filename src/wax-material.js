@@ -43,7 +43,7 @@ export function createShellMaterial() {
     crackCellFrequency: { value: 3.2 },
     waxRoughnessBase: { value: 0.38 },
     coreMap: { value: makeDefaultCoreTexture() },
-    projectionScale: { value: 1 },
+    projectionScale: { value: new THREE.Vector2(1, 1) },
     hazeAmount: { value: 0.45 },
     sparkleAmount: { value: 0 },
   };
@@ -88,7 +88,7 @@ export function createShellMaterial() {
 export function createCoreMaterial() {
   const uniforms = {
     coreMap: { value: makeDefaultCoreTexture() },
-    projectionScale: { value: 1 },
+    projectionScale: { value: new THREE.Vector2(1, 1) },
   };
 
   const material = new THREE.MeshPhysicalMaterial({
@@ -197,8 +197,8 @@ export function setCoreTexture(coreMaterial, shellMaterial, texture) {
   if (old) old.dispose();
 }
 
-/** Keeps the front-projected core texture (and its haze hint on the shell) sized to the current shape's silhouette. */
-export function setProjectionScale(coreMaterial, shellMaterial, scale) {
-  coreMaterial.userData.waxUniforms.projectionScale.value = scale;
-  shellMaterial.userData.waxUniforms.projectionScale.value = scale;
+/** Keeps the front-projected core texture (and its haze hint on the shell) sized to the source photo's own half-width/half-height ({x, y}), not the shape's silhouette — see deformable-mesh.js's imageFrameHalfExtent and 2026-08-05/11_Plan.md for why those two are usually different numbers. */
+export function setProjectionScale(coreMaterial, shellMaterial, { x, y }) {
+  coreMaterial.userData.waxUniforms.projectionScale.value.set(x, y);
+  shellMaterial.userData.waxUniforms.projectionScale.value.set(x, y);
 }

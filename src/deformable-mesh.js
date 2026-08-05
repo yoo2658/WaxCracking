@@ -1,17 +1,67 @@
 import * as THREE from 'three';
 
-const MAX_PLASTIC_DISPLACEMENT_RATIO = 0.32;
+// Displacement/thickness constants below are expressed relative to
+// `thicknessAxis` (see constructor), not `radius` — see 2026-08-05/02_Plan.md.
+// thicknessAxis is min(2*radius, localDepth): for a sphere that's exactly
+// the diameter (2*radius), so these ratios were derived by halving the old
+// radius-relative constants (e.g. 0.32 of radius == 0.16 of diameter) —
+// the sphere's actual behavior is unchanged. For a flat/thin custom shape,
+// localDepth (its real front-to-back thickness) is far smaller than its
+// bounding-sphere diameter, so thicknessAxis correctly shrinks to that real
+// thickness instead of letting a wide-but-thin shape poke itself through.
+const MAX_PLASTIC_DISPLACEMENT_RATIO = 0.16;
 const POKE_DEPTH_RATIO_OF_MAX = 0.72; // poke depth relative to maxDisplacement, kept < 1 so thin shapes don't punch through
 const CRACK_RATE_PER_HIT = 0.55;
 const ELASTIC_DECAY_LAMBDA = 2.6; // lower = slower, gooier slime spring-back
 const BREAK_DAMAGE_THRESHOLD = 0.5; // crackDamage level (post-first-break) at which a chunk actually pops loose — reached by roughly two full-strength pokes at the same spot, continuous hold or separate taps alike. Halved from 0.95 to match MIN/MAX_HOLD_STRENGTH also being halved in pointer-interaction.js — otherwise the same "about two pokes" would've needed roughly twice as many now that each poke applies half the force.
-const HOLE_RADIUS_RATIO = 0.7; // how much of the shell opens up per popped chunk. The smoothstep falloff below means the actual visible opening (where the interpolated mask crosses the 0.5 discard threshold) is roughly half of this ratio's radius
-const FRAGMENT_RADIUS_RATIO = 0.18; // size of the falling debris shard — deliberately much smaller than HOLE_RADIUS_RATIO, since a huge chunk flying off every hit read as excessive
+// Both below are ratios of influenceRadius (the poke's own footprint scale),
+// NOT of the whole shape's radius — they used to be radius-relative (0.7 and
+// 0.18 of radius), which is harmless on a sphere (influenceRadius is a fixed
+// 0.5 of radius there, so these values were simply rescaled by /0.5 to land
+// on the exact same numbers) but badly wrong on a compact custom shape: a
+// face-shaped custom shape's `radius` is set by its overall silhouette size, so
+// "0.7 of radius" could cover a huge fraction of a small, compact face in
+// one break. influenceRadius already accounts for that (see constructor —
+// it's additionally capped by minFeatureRadius for tightly curved shapes),
+// so tying the hole/crack/fragment spread to it instead means a break's
+// visible size actually tracks "how big is a single press", not "how big is
+// the whole object" — reported directly: a single hit on a face-shaped photo
+// was cracking/revealing most of the visible face.
+const HOLE_RADIUS_RATIO = 1.4; // = old 0.7-of-radius, rebased to influenceRadius (0.7 / 0.5) — see comment above
+const FRAGMENT_RADIUS_RATIO = 0.36; // = old 0.18-of-radius, rebased the same way (0.18 / 0.5) — deliberately much smaller than HOLE_RADIUS_RATIO, since a huge chunk flying off every hit read as excessive
 export const FIRST_BREAK_HOLD_SECONDS = 1.5; // a pristine, never-yet-broken wax needs one sustained press this long before its first dramatic break (wide crack burst + hole + fragment) — it still dents and cracks a little from the very first instant of any press, same as later ones, this just withholds the big payoff
 const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25; // the payoff for that first sustained press is a wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area. Halved from 2.5 per feedback that the crack spread felt too wide.
 const REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9; // every later break also gets a modest crack-spread halo around its hole — without this, a regular break only had whatever crackDamage the poke() hits themselves happened to leave nearby (a much smaller radius), so the area around a fresh hole looked almost uncracked.
 
-const SHELL_THICKNESS_RATIO = 0.07; // wax coating thickness, as a fraction of shape radius
+const SHELL_THICKNESS_RATIO = 0.035; // wax coating thickness, as a fraction of thicknessAxis (was 0.07 of radius — same halving as MAX_PLASTIC_DISPLACEMENT_RATIO above)
+
+// How much of a silhouette's local clearance (see geometries.js's
+// computeShellClearance) the wax shell is allowed to actually use as
+// thickness there. Well below 1 so even the narrowest spot the shell
+// reaches into still leaves a visible gap between its two sides, instead of
+// letting them just barely touch (which read as flickery, not solid).
+const SHELL_CLEARANCE_SAFETY_RATIO = 0.6;
+
+// How far a poke's footprint/depth are allowed to reach relative to
+// minFeatureRadius (the tightest local curvature anywhere on the shape — see
+// constructor). Both stay well below 1 so even a poke centered exactly on
+// the tightest bend can't displace far enough to fold that bend onto itself.
+const RIM_INFLUENCE_SAFETY_RATIO = 0.9;
+const RIM_DISPLACEMENT_SAFETY_RATIO = 0.5;
+
+// A poke only affects vertices whose rest-normal roughly agrees with the
+// clicked point's own normal — vertices facing away (dot below the low end)
+// get zero weight, vertices facing the same way (dot above the high end)
+// get full weight, smoothly in between. Without this, "nearby in raw 3D
+// distance" was the only test poke() used to decide what to dent/crack — on
+// a sphere that's harmless (everything within influenceRadius already faces
+// a similar way; the closest point on the far side is a full diameter away,
+// well outside range), but on a thin flat shape the point directly behind a
+// click, on the OPPOSITE face, can be just as "close" as points actually
+// next to it on the SAME face — which is what let a single press dent/crack/
+// even break through both faces at once (see 02_Plan.md's problem A).
+const NORMAL_ALIGN_GATE_START = -0.1;
+const NORMAL_ALIGN_GATE_END = 0.3;
 
 // The "poke" displacement is a signed radial field, not a pure dent: a center
 // lobe pushes inward (the finger dent) while a ring just outside it pushes
@@ -62,10 +112,54 @@ export class DeformableMesh {
 
     geometry.computeBoundingSphere();
     this.radius = geometry.boundingSphere.radius;
-    this.influenceRadius = this.radius * 0.5;
-    this.maxDisplacement = this.radius * MAX_PLASTIC_DISPLACEMENT_RATIO;
-    this.pokeDepth = this.maxDisplacement * POKE_DEPTH_RATIO_OF_MAX;
-    this.shellThickness = this.radius * SHELL_THICKNESS_RATIO;
+    // localDepth (set by geometries.js) is this shape's real front-to-back
+    // thickness — falls back to a sphere's own diameter if a geometry
+    // somehow doesn't provide one. thicknessAxis is the smaller of "overall
+    // diameter" and "actual local thickness": for a sphere those are the
+    // same number, so nothing changes; for a flat custom shape, localDepth
+    // (much smaller than its wide bounding-sphere diameter) correctly wins.
+    this.localDepth = geometry.userData.localDepth ?? this.radius * 2;
+    const thicknessAxis = Math.min(this.radius * 2, this.localDepth);
+    // minFeatureRadius (set by geometries.js) is the tightest local bend
+    // anywhere on this shape — a sphere's own radius (uniform curvature), or
+    // a custom shape's beveled rim curvature, which can be much tighter than
+    // both the radius and thicknessAxis. Neither of those two already guards
+    // against this: thicknessAxis only stops a poke from reaching the
+    // OPPOSITE face; it says nothing about a poke on the SAME, tightly
+    // curved surface displacing neighboring vertices (whose normals point in
+    // rapidly different directions right there) past what that curve can
+    // absorb without folding the mesh onto itself — exactly the glitchy
+    // striping seen when pressing a custom shape's rounded rim. Capping both
+    // the footprint and the depth by this value fixes that; falls back to
+    // `this.radius` (a sphere's own uniform curvature) if a geometry doesn't
+    // provide one, so both caps below are always looser than the existing
+    // ones for a sphere — no change to its behavior.
+    const minFeatureRadius = geometry.userData.minFeatureRadius ?? this.radius;
+    // Two variants instead of one shape-wide value: "flat" is the generous
+    // limit (same math as before this fix — thickness/radius-based only),
+    // "rim" is the tight, minFeatureRadius-capped limit from the previous
+    // fix. Which one actually applies is decided PER VERTEX in poke() (via
+    // curvatureSafety below, through _influenceRadiusFor/_maxDisplacementFor),
+    // not once for the whole shape — a single global rim-safe clamp stopped
+    // the rim from folding, but it also made every press on the flat cap
+    // feel weak, not just presses actually near the rim (reported directly —
+    // see 2026-08-05/08_Check.md).
+    this.influenceRadiusFlat = this.radius * 0.5;
+    this.influenceRadiusRim = Math.min(this.influenceRadiusFlat, minFeatureRadius * RIM_INFLUENCE_SAFETY_RATIO);
+    this.maxDisplacementFlat = thicknessAxis * MAX_PLASTIC_DISPLACEMENT_RATIO;
+    this.maxDisplacementRim = Math.min(this.maxDisplacementFlat, minFeatureRadius * RIM_DISPLACEMENT_SAFETY_RATIO);
+    // Per-vertex "how safe is a big displacement here" (1 = flat cap, 0 =
+    // tightly curved rim — see geometries.js's computeCurvatureSafety).
+    // Falls back to all-1 (always use the generous limit) if a geometry
+    // doesn't provide one.
+    this.curvatureSafety = geometry.userData.curvatureSafety ?? new Float32Array(geometry.attributes.position.count).fill(1);
+    // Half-width/half-height of the source photo's own frame (set by
+    // geometries.js), in the same units as `radius` — used to size the
+    // front-projected texture to the photo's true scale. Falls back to a
+    // square matching `radius` (the old, single-scalar behavior) if a
+    // geometry doesn't provide one.
+    this.imageFrameHalfExtent = geometry.userData.imageFrameHalfExtent ?? { x: this.radius, y: this.radius };
+    this.shellThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
 
     const shellGeometry = geometry; // outer silhouette, unchanged from the built shape
     const coreGeometry = geometry.clone(); // deep-copies attributes/index — safe to mutate independently
@@ -74,25 +168,64 @@ export class DeformableMesh {
     this.vertexCount = shellPositionAttr.count;
     const shellRestPosition = shellPositionAttr.array;
 
-    // Direction from the origin to each vertex — exactly the outward surface
-    // normal for a sphere centered on the origin, and much simpler/more
-    // robust than trusting the mesh's own computed normals (which can be
-    // unstable at degenerate triangles on other shapes).
-    this.restNormal = new Float32Array(this.vertexCount * 3);
+    // Per-vertex ceiling on shellThickness (set by geometries.js, sampling
+    // the silhouette's own local-thickness field directly at each vertex's
+    // position — see geometries.js's computeShellClearance) — small at a
+    // silhouette's narrow/concave spots (between two ears, an armpit, a thin
+    // hair spike, ...), large anywhere wide open, including the whole
+    // sphere. Without this, the shell's constant outward offset could push
+    // both sides of a narrow neck past each other, leaving a gap right there
+    // that exposes the core (and whatever photo/color it's showing) —
+    // reported directly as "복잡한 경계면은 왁스가 감싸지지 않고 속 재질이
+    // 보이는" (see 2026-08-05/14_Plan.md). Precomputed once here (not
+    // re-derived every frame in _rebuildPositions()) since shellClearance
+    // itself never changes after the shape is built. No curvature-based
+    // gating needed — an earlier version of this only trusted shellClearance
+    // near the rim (gating by curvatureSafety) because shellClearance itself
+    // was unreliable everywhere else; now that it's measured directly per
+    // vertex, it's already correctly large in the deep-interior flat-cap
+    // case on its own (see 2026-08-05/17_Plan.md).
+    const shellClearance = geometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
+    this.localShellThickness = new Float32Array(this.vertexCount);
     for (let v = 0; v < this.vertexCount; v++) {
-      const i3 = v * 3;
-      const x = shellRestPosition[i3];
-      const y = shellRestPosition[i3 + 1];
-      const z = shellRestPosition[i3 + 2];
-      const len = Math.sqrt(x * x + y * y + z * z) || 1;
-      this.restNormal[i3] = x / len;
-      this.restNormal[i3 + 1] = y / len;
-      this.restNormal[i3 + 2] = z / len;
+      this.localShellThickness[v] = Math.min(this.shellThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
+    }
+
+    // The shape's real vertex normals (geometries.js runs every shape through
+    // weldAndSmooth(), i.e. merge + computeVertexNormals(), so this attribute
+    // always exists). This used to be approximated as "direction from the
+    // origin to the vertex" instead, which is only ever equal to the real
+    // surface normal for a sphere centered on the origin — on a flat custom
+    // shape's front/back faces that approximation points diagonally outward
+    // (toward the rim) rather than straight along the shape's own thin axis,
+    // which is exactly the kind of mismatch that let the shell/core offset
+    // and the poke's push direction drift away from "actually along the
+    // surface" (see 2026-08-05/02_Plan.md). No change for a sphere: its real
+    // vertex normals already point almost exactly in the origin direction.
+    const shellNormalAttr = shellGeometry.attributes.normal;
+    this.restNormal = new Float32Array(this.vertexCount * 3);
+    if (shellNormalAttr) {
+      this.restNormal.set(shellNormalAttr.array);
+    } else {
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const x = shellRestPosition[i3];
+        const y = shellRestPosition[i3 + 1];
+        const z = shellRestPosition[i3 + 2];
+        const len = Math.sqrt(x * x + y * y + z * z) || 1;
+        this.restNormal[i3] = x / len;
+        this.restNormal[i3 + 1] = y / len;
+        this.restNormal[i3 + 2] = z / len;
+      }
     }
 
     this.restPosition = new Float32Array(this.vertexCount * 3);
-    for (let i = 0; i < this.restPosition.length; i++) {
-      this.restPosition[i] = shellRestPosition[i] - this.restNormal[i] * this.shellThickness;
+    for (let v = 0; v < this.vertexCount; v++) {
+      const i3 = v * 3;
+      const t = this.localShellThickness[v];
+      this.restPosition[i3] = shellRestPosition[i3] - this.restNormal[i3] * t;
+      this.restPosition[i3 + 1] = shellRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
+      this.restPosition[i3 + 2] = shellRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
     }
     coreGeometry.attributes.position.array.set(this.restPosition);
     coreGeometry.attributes.position.needsUpdate = true;
@@ -130,8 +263,20 @@ export class DeformableMesh {
 
   /**
    * Given a rough direction from the origin (e.g. a bounding-sphere hit),
-   * returns the actual rest-position vertex most aligned with it — i.e. the
-   * real point on this shape's surface in that direction.
+   * returns the actual rest-position vertex most aligned with it (the real
+   * point on this shape's surface in that direction) together with its real
+   * rest-normal. pointer-interaction.js uses the normal as the poke's push
+   * direction — it used to just normalize the point itself (direction from
+   * origin), which is only ever correct for a sphere (where "away from
+   * center" and "the real surface normal" happen to be the same vector);
+   * on a flat custom shape they can differ a lot (e.g. every point on a flat
+   * face shares one real normal but has a different origin-direction), so
+   * this now returns the actual restNormal instead. Known remaining
+   * approximation: the ARGMAX search below still only looks at "closest
+   * origin-direction", which on a very thin shape can occasionally prefer a
+   * point on the opposite face over the intended one at near-identical
+   * angles — deferred the same way the previous cycle deferred it (tune
+   * later against real photos rather than pre-solving it now).
    */
   surfacePointTowards(direction) {
     const rest = this.restPosition;
@@ -156,7 +301,19 @@ export class DeformableMesh {
     }
 
     const i3 = bestIndex * 3;
-    return new THREE.Vector3(rest[i3], rest[i3 + 1], rest[i3 + 2]);
+    const point = new THREE.Vector3(rest[i3], rest[i3 + 1], rest[i3 + 2]);
+    const normal = new THREE.Vector3(this.restNormal[i3], this.restNormal[i3 + 1], this.restNormal[i3 + 2]);
+    return { point, normal };
+  }
+
+  /** The dent-footprint radius to use at a vertex with this curvatureSafety (1 = flat cap, 0 = tight rim) — shared by poke() and _checkBreak() so the flat/rim blend formula lives in one place. */
+  _influenceRadiusFor(safety) {
+    return THREE.MathUtils.lerp(this.influenceRadiusRim, this.influenceRadiusFlat, safety);
+  }
+
+  /** Same blend as _influenceRadiusFor, for the permanent-displacement limit — shared by poke() and _clampPlastic(). */
+  _maxDisplacementFor(safety) {
+    return THREE.MathUtils.lerp(this.maxDisplacementRim, this.maxDisplacementFlat, safety);
   }
 
   /**
@@ -177,15 +334,19 @@ export class DeformableMesh {
   poke(pointWorld, normal, strength = 1, holdSeconds = 0) {
     const rest = this.restPosition;
     const restNormal = this.restNormal;
-    const dentRadius = this.influenceRadius;
-    const bulgeRiseStart = dentRadius * BULGE_RISE_START_RATIO;
-    const bulgePeak = dentRadius * BULGE_PEAK_RATIO;
-    const bulgeOuter = dentRadius * BULGE_OUTER_RATIO;
+    const curvatureSafety = this.curvatureSafety;
+    // The widest/deepest a poke could EVER reach (the flat-safe limit) —
+    // used only to size the vertex-search loop below. Each vertex actually
+    // considered gets its OWN dentRadius/depth further down, blended by ITS
+    // OWN curvatureSafety — so a single poke whose footprint happens to
+    // straddle both the flat cap and the curved rim treats each side
+    // correctly instead of picking one shape-wide compromise.
+    const bulgeOuterMax = this.influenceRadiusFlat * BULGE_OUTER_RATIO;
+    const bulgeOuterMaxSq = bulgeOuterMax * bulgeOuterMax;
     const target = this.materialMode === 'slime' ? this.elasticSnapshot : this.plasticOffset;
-    const depth = this.pokeDepth * strength;
-    const dirX = -normal.x * depth;
-    const dirY = -normal.y * depth;
-    const dirZ = -normal.z * depth;
+    const pushX = -normal.x;
+    const pushY = -normal.y;
+    const pushZ = -normal.z;
 
     if (this.materialMode === 'slime') {
       // Only bake in the current decay fraction on the FIRST poke of a fresh
@@ -206,21 +367,48 @@ export class DeformableMesh {
     }
 
     let nearestIndex = 0;
-    let nearestDist = Infinity;
+    let nearestDistSq = Infinity;
 
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
       const dx = rest[i3] - pointWorld.x;
       const dy = rest[i3 + 1] - pointWorld.y;
       const dz = rest[i3 + 2] - pointWorld.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist < nearestDist) {
-        nearestDist = dist;
+      // Squared distance only here — the sqrt is deferred below to just the
+      // vertices that actually pass both range gates (a small minority of
+      // vertexCount for any single poke), since finding a minimum/comparing
+      // against a radius works identically on squared values and this loop
+      // runs every frame of every hold.
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      // See NORMAL_ALIGN_GATE_* above: a vertex facing away from this poke
+      // (e.g. the opposite face of a thin shape, which can be just as close
+      // in raw distance as the intended face) is excluded here so it can
+      // never register as "nearest", get dented, or accrue crack damage.
+      const alignDot = restNormal[i3] * normal.x + restNormal[i3 + 1] * normal.y + restNormal[i3 + 2] * normal.z;
+      const alignWeight = THREE.MathUtils.smoothstep(alignDot, NORMAL_ALIGN_GATE_START, NORMAL_ALIGN_GATE_END);
+
+      if (alignWeight > 0 && distSq < nearestDistSq) {
+        nearestDistSq = distSq;
         nearestIndex = v;
       }
-      if (dist >= bulgeOuter) continue;
+      if (distSq >= bulgeOuterMaxSq || alignWeight <= 0) continue;
 
-      const dentWeight = dist < dentRadius ? THREE.MathUtils.smoothstep(dentRadius - dist, 0, dentRadius) : 0;
+      // This vertex's OWN safe limits — flat cap vertices get the generous
+      // (sphere-like) values, rim vertices get the tight ones, everything
+      // in between blends smoothly. See constructor / geometries.js's
+      // computeCurvatureSafety.
+      const safety = curvatureSafety[v];
+      const dentRadius = this._influenceRadiusFor(safety);
+      const depth = this._maxDisplacementFor(safety) * POKE_DEPTH_RATIO_OF_MAX * strength;
+      const bulgeRiseStart = dentRadius * BULGE_RISE_START_RATIO;
+      const bulgePeak = dentRadius * BULGE_PEAK_RATIO;
+      const bulgeOuter = dentRadius * BULGE_OUTER_RATIO;
+      if (distSq >= bulgeOuter * bulgeOuter) continue; // outside even this vertex's own (possibly smaller) footprint
+
+      const dist = Math.sqrt(distSq); // only now — needed for the actual falloff shape below, not just a range check
+
+      const dentWeight = THREE.MathUtils.smoothstep(dentRadius - dist, 0, dentRadius) * alignWeight; // already 0 once dist >= dentRadius, no extra guard needed
 
       let bulgeWeight = 0;
       if (dist > bulgeRiseStart) {
@@ -229,10 +417,11 @@ export class DeformableMesh {
             ? THREE.MathUtils.smoothstep(dist, bulgeRiseStart, bulgePeak)
             : 1 - THREE.MathUtils.smoothstep(dist, bulgePeak, bulgeOuter);
       }
+      bulgeWeight *= alignWeight;
 
-      target[i3] += dirX * dentWeight + restNormal[i3] * depth * BULGE_STRENGTH * bulgeWeight;
-      target[i3 + 1] += dirY * dentWeight + restNormal[i3 + 1] * depth * BULGE_STRENGTH * bulgeWeight;
-      target[i3 + 2] += dirZ * dentWeight + restNormal[i3 + 2] * depth * BULGE_STRENGTH * bulgeWeight;
+      target[i3] += pushX * depth * dentWeight + restNormal[i3] * depth * BULGE_STRENGTH * bulgeWeight;
+      target[i3 + 1] += pushY * depth * dentWeight + restNormal[i3 + 1] * depth * BULGE_STRENGTH * bulgeWeight;
+      target[i3 + 2] += pushZ * depth * dentWeight + restNormal[i3 + 2] * depth * BULGE_STRENGTH * bulgeWeight;
 
       if (dentWeight > 0) {
         const next = this.crackDamage[v] + dentWeight * CRACK_RATE_PER_HIT * strength;
@@ -247,7 +436,7 @@ export class DeformableMesh {
     this._dirtyPosition = true;
     this._dirtyAttributes = true;
 
-    return this._checkBreak(pointWorld, nearestIndex, holdSeconds);
+    return this._checkBreak(pointWorld, normal, nearestIndex, holdSeconds);
   }
 
   /**
@@ -257,8 +446,15 @@ export class DeformableMesh {
    * underneath never spawns more debris (also what stops the very hole that
    * just opened from immediately re-triggering next frame).
    */
-  _checkBreak(pointWorld, nearestIndex, holdSeconds) {
+  _checkBreak(pointWorld, normal, nearestIndex, holdSeconds) {
     if (this.holeMask[nearestIndex] > 0.5) return null;
+
+    // Same flat-vs-rim blend as poke() (see _influenceRadiusFor), but by the
+    // NEAREST vertex's own curvatureSafety — a break on the flat cap opens a
+    // proportionally bigger hole (matching the bigger dent it took to get
+    // there), a break near the rim stays conservative, instead of every
+    // break everywhere being capped down to the rim-safe size.
+    const influenceRadius = this._influenceRadiusFor(this.curvatureSafety[nearestIndex]);
 
     if (!this.hasBrokenOnce) {
       if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
@@ -267,59 +463,73 @@ export class DeformableMesh {
       // an ordinary break — but the actual hole/fragment stay normal-sized,
       // so the wax reads as "it just cracked all over" rather than "a huge
       // chunk of it vanished".
-      this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
-      this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
-      return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
+      this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
+      this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
+      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
     }
 
     if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
-    this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
-    this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
-    return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+    this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
+    this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
+    return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+  }
+
+  /**
+   * Shared by _boostCrackAt/_boostHoleAt below, which are otherwise
+   * identical aside from which per-vertex field they raise — the only
+   * difference is passed in as `field`. Gated by normal alignment (see
+   * NORMAL_ALIGN_GATE_* / poke()) so a break on one face of a thin shape
+   * can't also crack/hole the opposite face — without it, a chunk breaking
+   * off the front could punch straight through to the back, which is
+   * exactly the "속이 비어서 반대편이 보이는" symptom this cycle set out to
+   * fix. Only breaks fire this (not every frame), but it still defers the
+   * sqrt past the cheap squared-distance range check, same as poke().
+   */
+  _boostFieldAt(field, pointWorld, normal, radius) {
+    const rest = this.restPosition;
+    const restNormal = this.restNormal;
+    const radiusSq = radius * radius;
+    for (let v = 0; v < this.vertexCount; v++) {
+      const i3 = v * 3;
+      const dx = rest[i3] - pointWorld.x;
+      const dy = rest[i3 + 1] - pointWorld.y;
+      const dz = rest[i3 + 2] - pointWorld.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq >= radiusSq) continue;
+      const alignDot = restNormal[i3] * normal.x + restNormal[i3 + 1] * normal.y + restNormal[i3 + 2] * normal.z;
+      const alignWeight = THREE.MathUtils.smoothstep(alignDot, NORMAL_ALIGN_GATE_START, NORMAL_ALIGN_GATE_END);
+      if (alignWeight <= 0) continue;
+      const dist = Math.sqrt(distSq);
+      const weight = THREE.MathUtils.smoothstep(radius - dist, 0, radius) * alignWeight;
+      field[v] = Math.max(field[v], weight);
+    }
+    this._dirtyAttributes = true;
   }
 
   /** Widens the visible crack network around a point without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. */
-  _boostCrackAt(pointWorld, radius) {
-    const rest = this.restPosition;
-    for (let v = 0; v < this.vertexCount; v++) {
-      const i3 = v * 3;
-      const dx = rest[i3] - pointWorld.x;
-      const dy = rest[i3 + 1] - pointWorld.y;
-      const dz = rest[i3 + 2] - pointWorld.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist >= radius) continue;
-      const weight = THREE.MathUtils.smoothstep(radius - dist, 0, radius);
-      this.crackDamage[v] = Math.max(this.crackDamage[v], weight);
-    }
-    this._dirtyAttributes = true;
+  _boostCrackAt(pointWorld, normal, radius) {
+    this._boostFieldAt(this.crackDamage, pointWorld, normal, radius);
   }
 
   /** Marks the spot a chunk just fell off of as a clean hole in the shell — no crack cosmetics there, and the shell fragment shader discards it so the core shows through. */
-  _boostHoleAt(pointWorld, radius) {
-    const rest = this.restPosition;
-    for (let v = 0; v < this.vertexCount; v++) {
-      const i3 = v * 3;
-      const dx = rest[i3] - pointWorld.x;
-      const dy = rest[i3 + 1] - pointWorld.y;
-      const dz = rest[i3 + 2] - pointWorld.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist >= radius) continue;
-      const weight = THREE.MathUtils.smoothstep(radius - dist, 0, radius);
-      this.holeMask[v] = Math.max(this.holeMask[v], weight);
-    }
-    this._dirtyAttributes = true;
+  _boostHoleAt(pointWorld, normal, radius) {
+    this._boostFieldAt(this.holeMask, pointWorld, normal, radius);
   }
 
+  /** Clamps each vertex's permanent (clay) displacement to ITS OWN safe limit — a single shape-wide clamp would either let a rim vertex fold (if set to the generous flat limit) or needlessly flatten a legitimately deep flat-cap dent (if set to the tight rim limit) just because some OTHER vertex elsewhere happens to be poked next. */
   _clampPlastic() {
     const plastic = this.plasticOffset;
-    const max = this.maxDisplacement;
+    const curvatureSafety = this.curvatureSafety;
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
-      const len = Math.sqrt(
-        plastic[i3] * plastic[i3] + plastic[i3 + 1] * plastic[i3 + 1] + plastic[i3 + 2] * plastic[i3 + 2],
-      );
-      if (len > max) {
-        const s = max / len;
+      const max = this._maxDisplacementFor(curvatureSafety[v]);
+      const lenSq = plastic[i3] * plastic[i3] + plastic[i3 + 1] * plastic[i3 + 1] + plastic[i3 + 2] * plastic[i3 + 2];
+      if (lenSq > max * max) {
+        // sqrt deferred until here — the overwhelming majority of vertices
+        // at any given moment are well under their own limit and never
+        // reach this branch, so most of the loop is just the cheap lenSq
+        // compare above.
+        const s = max / Math.sqrt(lenSq);
         plastic[i3] *= s;
         plastic[i3 + 1] *= s;
         plastic[i3 + 2] *= s;
@@ -368,7 +578,7 @@ export class DeformableMesh {
     const plastic = this.plasticOffset;
     const elastic = this.elasticSnapshot;
     const decay = this.elasticDecay;
-    const thickness = this.shellThickness;
+    const localShellThickness = this.localShellThickness;
     const holeMask = this.holeMask;
 
     // The shell is always defined AS the core's own surface plus a constant
@@ -376,10 +586,12 @@ export class DeformableMesh {
     // independently-blended rest shape. That guarantees the coating can
     // never be poked through by a big dent or bulge, however far the core
     // moves: it's not "how much does the shell follow", it's "the shell IS
-    // wherever the core is, plus a thin skin".
+    // wherever the core is, plus a thin skin" (that skin's own thickness
+    // already narrowed per-vertex at any tight/concave spot — see
+    // localShellThickness in the constructor).
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
-      const gap = thickness * (1 - holeMask[v]);
+      const gap = localShellThickness[v] * (1 - holeMask[v]);
       for (let k = 0; k < 3; k++) {
         const idx = i3 + k;
         const corePosition = rest[idx] + plastic[idx] + elastic[idx] * decay;

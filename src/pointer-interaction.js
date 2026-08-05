@@ -7,6 +7,41 @@ const MAX_HOLD_STRENGTH = 1.2; // halved from 2.4, same reason
 const HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
 
 /**
+ * Ray-vs-ellipsoid intersection (semi-axes semiXY, semiXY, semiZ; centered at
+ * the origin), returning the nearest point in front of the ray or null.
+ * Used instead of a plain bounding-sphere test (see _onDown) because a flat
+ * custom shape's bounding sphere — sized to its wide silhouette — sits far
+ * outside where its actual thin surface is; a ray hitting that sphere lands
+ * nowhere near the real geometry, so surfacePointTowards' "closest direction
+ * from origin" match ends up comparing against the wrong scale and can pick
+ * an inconsistent vertex from one click to the next (see
+ * 2026-08-05/08_Check.md). semiXY = semiZ reduces this to an exact sphere —
+ * i.e. a sphere is the special case, not a separate code path.
+ */
+function intersectRayEllipsoid(ray, semiXY, semiZ) {
+  const ox = ray.origin.x / semiXY;
+  const oy = ray.origin.y / semiXY;
+  const oz = ray.origin.z / semiZ;
+  const dx = ray.direction.x / semiXY;
+  const dy = ray.direction.y / semiXY;
+  const dz = ray.direction.z / semiZ;
+
+  const a = dx * dx + dy * dy + dz * dz;
+  const b = 2 * (ox * dx + oy * dy + oz * dz);
+  const c = ox * ox + oy * oy + oz * oz - 1;
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) return null;
+
+  const sqrtDiscriminant = Math.sqrt(discriminant);
+  const t1 = (-b - sqrtDiscriminant) / (2 * a);
+  const t2 = (-b + sqrtDiscriminant) / (2 * a);
+  const t = t1 >= 0 ? t1 : t2; // nearest intersection actually in front of the ray, matching THREE's intersectSphere semantics
+  if (t < 0) return null;
+
+  return ray.origin.clone().addScaledVector(ray.direction, t);
+}
+
+/**
  * Presses the wax in real time: as soon as the pointer goes down, it starts
  * denting immediately, and gets deeper the longer it's held — like actually
  * pressing a thumb into something, not a discrete tap resolved only on
@@ -16,7 +51,7 @@ const HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
  * same gesture, it just stops feeding the mesh once a drag is detected.
  */
 export class PointerInteraction {
-  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap }) {
+  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap, onCrackAttempt }) {
     this.renderer = renderer;
     this.camera = camera;
     this.getActiveMesh = getActiveMesh;
@@ -24,10 +59,11 @@ export class PointerInteraction {
     this.onFragmentPop = onFragmentPop;
     this.onPressProgress = onPressProgress;
     this.onShortTap = onShortTap;
+    this.onCrackAttempt = onCrackAttempt;
 
     this.raycaster = new THREE.Raycaster();
     this.ndc = new THREE.Vector2();
-    this.active = null; // { downX, downY, point, normal, startTime, appliedStrength, brokeOrReleasedSound }
+    this.active = null; // { downX, downY, point, normal, startTime, appliedStrength, soundPlayed }
 
     const dom = renderer.domElement;
     dom.addEventListener('pointerdown', this._onDown);
@@ -51,19 +87,25 @@ export class PointerInteraction {
     );
     this.raycaster.setFromCamera(this.ndc, this.camera);
 
-    // Find the click direction via the geometry's bounding sphere rather
-    // than an exact per-triangle Mesh raycast: on this project's generated
-    // (welded/merged) geometries, the exact triangle test proved unreliable
-    // in practice — intermittently missing valid hits for reasons that
-    // didn't trace back to winding, material, or geometry corruption. The
-    // sphere test is simple, deterministic math with no such flakiness.
-    // That gives a direction, not an accurate surface point for non-round
-    // shapes, so snap it to the nearest real vertex via surfacePointTowards.
-    const sphere = mesh.mesh.geometry.boundingSphere;
-    const approx = new THREE.Vector3();
-    if (!sphere || !this.raycaster.ray.intersectSphere(sphere, approx)) return;
-    const point = mesh.surfacePointTowards(approx);
-    const normal = point.clone().normalize();
+    // Find the click direction via a simple analytic shape (an ellipsoid
+    // sized to this mesh's own radius/localDepth) rather than an exact
+    // per-triangle Mesh raycast: on this project's generated (welded/merged)
+    // geometries, the exact triangle test proved unreliable in practice —
+    // intermittently missing valid hits for reasons that didn't trace back
+    // to winding, material, or geometry corruption. The ellipsoid test is
+    // simple, deterministic math with no such flakiness, and — unlike a
+    // plain bounding sphere — actually sits close to a flat custom shape's
+    // real thin surface instead of ballooning out to its widest silhouette
+    // extent (see intersectRayEllipsoid above). That gives a direction, not
+    // an accurate surface point, so snap it to the nearest real vertex via
+    // surfacePointTowards.
+    const approx = intersectRayEllipsoid(this.raycaster.ray, mesh.radius, mesh.localDepth / 2);
+    if (!approx) return;
+    // normal is the shape's actual rest-normal at the snapped point, not
+    // point.clone().normalize() (direction from the origin) — those only
+    // coincide for a sphere; on a flat custom shape they can point in very
+    // different directions (see deformable-mesh.js's surfacePointTowards).
+    const { point, normal } = mesh.surfacePointTowards(approx);
 
     this.active = {
       downX: event.clientX,
@@ -74,6 +116,14 @@ export class PointerInteraction {
       appliedStrength: 0,
       soundPlayed: false,
     };
+
+    // A still-pristine wax gets an audible "hairline crack" cue on every
+    // attempt (not just its eventual first real break, which already has
+    // its own sound) — repeated short taps before the player realizes they
+    // need to hold it down still each get this feedback.
+    if (!mesh.hasBrokenOnce) {
+      this.onCrackAttempt?.();
+    }
   };
 
   _onMove = (event) => {

@@ -31498,29 +31498,455 @@ void main() {
     return result;
   }
 
+  // src/silhouette.js
+  var MASK_SIZE = 128;
+  var ALPHA_THRESHOLD = 128;
+  var TRANSPARENT_ALPHA_CUTOFF = 200;
+  var TRANSPARENT_RATIO_THRESHOLD = 0.01;
+  var ROUND_BLUR_RADIUS_RATIO = 0.05;
+  var SIMPLIFY_EPSILON = 1.2;
+  var SIMPLIFY_MAX_POINTS = 90;
+  var SPLINE_SAMPLE_COUNT = 128;
+  var LOCAL_THICKNESS_SEARCH_RADIUS_RATIO = 0.45;
+  function rasterizeAlpha(image) {
+    const canvas2 = document.createElement("canvas");
+    canvas2.width = MASK_SIZE;
+    canvas2.height = MASK_SIZE;
+    const ctx = canvas2.getContext("2d");
+    const scale = Math.min(MASK_SIZE / image.width, MASK_SIZE / image.height);
+    const drawWidth = image.width * scale;
+    const drawHeight = image.height * scale;
+    const offsetX = (MASK_SIZE - drawWidth) / 2;
+    const offsetY = (MASK_SIZE - drawHeight) / 2;
+    ctx.clearRect(0, 0, MASK_SIZE, MASK_SIZE);
+    ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+    const { data } = ctx.getImageData(0, 0, MASK_SIZE, MASK_SIZE);
+    const alpha = new Uint8ClampedArray(MASK_SIZE * MASK_SIZE);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3];
+    return { alpha, offsetX, offsetY, drawWidth, drawHeight };
+  }
+  function hasTransparentBackground({ alpha, offsetX, offsetY, drawWidth, drawHeight }) {
+    const margin = 1;
+    const x0 = Math.max(0, Math.ceil(offsetX) + margin);
+    const x1 = Math.min(MASK_SIZE, Math.floor(offsetX + drawWidth) - margin);
+    const y0 = Math.max(0, Math.ceil(offsetY) + margin);
+    const y1 = Math.min(MASK_SIZE, Math.floor(offsetY + drawHeight) - margin);
+    let transparentish = 0;
+    let total = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        total++;
+        if (alpha[y * MASK_SIZE + x] < TRANSPARENT_ALPHA_CUTOFF) transparentish++;
+      }
+    }
+    return total > 0 && transparentish / total > TRANSPARENT_RATIO_THRESHOLD;
+  }
+  function binarize(alpha) {
+    const mask = new Uint8Array(alpha.length);
+    for (let i = 0; i < alpha.length; i++) mask[i] = alpha[i] >= ALPHA_THRESHOLD ? 1 : 0;
+    return mask;
+  }
+  function roundMask(mask, size) {
+    const radius = Math.max(1, Math.round(size * ROUND_BLUR_RADIUS_RATIO));
+    const blurred = new Float32Array(mask.length);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let sum = 0;
+        let count = 0;
+        for (let dy = -radius; dy <= radius; dy++) {
+          const sy = y + dy;
+          if (sy < 0 || sy >= size) continue;
+          for (let dx = -radius; dx <= radius; dx++) {
+            const sx = x + dx;
+            if (sx < 0 || sx >= size) continue;
+            sum += mask[sy * size + sx];
+            count++;
+          }
+        }
+        blurred[y * size + x] = sum / count;
+      }
+    }
+    const rounded = new Uint8Array(mask.length);
+    for (let i = 0; i < mask.length; i++) rounded[i] = blurred[i] >= 0.5 ? 1 : 0;
+    return rounded;
+  }
+  function floodFillFrom(seeds, predicate, size, visited) {
+    const stack = [];
+    for (const idx of seeds) {
+      if (visited[idx]) continue;
+      visited[idx] = 1;
+      stack.push(idx);
+    }
+    while (stack.length) {
+      const idx = stack.pop();
+      const x = idx % size;
+      const y = (idx - x) / size;
+      const neighbors = [x > 0 ? idx - 1 : -1, x < size - 1 ? idx + 1 : -1, y > 0 ? idx - size : -1, y < size - 1 ? idx + size : -1];
+      for (const n of neighbors) {
+        if (n < 0 || visited[n] || !predicate(n)) continue;
+        visited[n] = 1;
+        stack.push(n);
+      }
+    }
+  }
+  function fillEnclosedHoles(mask, size) {
+    const isBackground = (i) => mask[i] === 0;
+    const seeds = [];
+    for (let x = 0; x < size; x++) {
+      seeds.push(x, (size - 1) * size + x);
+    }
+    for (let y = 0; y < size; y++) {
+      seeds.push(y * size, y * size + size - 1);
+    }
+    const reachable = new Uint8Array(mask.length);
+    floodFillFrom(seeds.filter(isBackground), isBackground, size, reachable);
+    const filled = mask.slice();
+    for (let i = 0; i < mask.length; i++) {
+      if (mask[i] === 0 && !reachable[i]) filled[i] = 1;
+    }
+    return filled;
+  }
+  function keepLargestComponent(mask, size) {
+    const isForeground = (i) => mask[i] === 1;
+    const globallyVisited = new Uint8Array(mask.length);
+    let best = null;
+    let bestCount = 0;
+    for (let i = 0; i < mask.length; i++) {
+      if (!isForeground(i) || globallyVisited[i]) continue;
+      const component = new Uint8Array(mask.length);
+      floodFillFrom([i], isForeground, size, component);
+      let count = 0;
+      for (let j = 0; j < component.length; j++) {
+        if (component[j]) {
+          globallyVisited[j] = 1;
+          count++;
+        }
+      }
+      if (count > bestCount) {
+        bestCount = count;
+        best = component;
+      }
+    }
+    return best ?? new Uint8Array(mask.length);
+  }
+  function distanceTransform(mask, size) {
+    const INF = 1e6;
+    const dist = new Float32Array(mask.length);
+    for (let i = 0; i < mask.length; i++) dist[i] = mask[i] === 1 ? INF : 0;
+    const ORTHOGONAL = 1;
+    const DIAGONAL = Math.SQRT2;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = y * size + x;
+        if (mask[i] === 0) continue;
+        let best = dist[i];
+        if (x > 0) best = Math.min(best, dist[i - 1] + ORTHOGONAL);
+        if (y > 0) {
+          best = Math.min(best, dist[i - size] + ORTHOGONAL);
+          if (x > 0) best = Math.min(best, dist[i - size - 1] + DIAGONAL);
+          if (x < size - 1) best = Math.min(best, dist[i - size + 1] + DIAGONAL);
+        }
+        dist[i] = best;
+      }
+    }
+    for (let y = size - 1; y >= 0; y--) {
+      for (let x = size - 1; x >= 0; x--) {
+        const i = y * size + x;
+        if (mask[i] === 0) continue;
+        let best = dist[i];
+        if (x < size - 1) best = Math.min(best, dist[i + 1] + ORTHOGONAL);
+        if (y < size - 1) {
+          best = Math.min(best, dist[i + size] + ORTHOGONAL);
+          if (x < size - 1) best = Math.min(best, dist[i + size + 1] + DIAGONAL);
+          if (x > 0) best = Math.min(best, dist[i + size - 1] + DIAGONAL);
+        }
+        dist[i] = best;
+      }
+    }
+    return dist;
+  }
+  function sampleLocalThickness(distField, size, px2, py2, searchRadius) {
+    let best = 0;
+    const x0 = Math.max(0, Math.floor(px2 - searchRadius));
+    const x1 = Math.min(size - 1, Math.ceil(px2 + searchRadius));
+    const y0 = Math.max(0, Math.floor(py2 - searchRadius));
+    const y1 = Math.min(size - 1, Math.ceil(py2 + searchRadius));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dq = distField[y * size + x];
+        if (dq <= best) continue;
+        const dist = Math.hypot(px2 - x, py2 - y);
+        if (dist <= dq) best = dq;
+      }
+    }
+    return best;
+  }
+  function localThicknessAt(distanceField, gridX, gridY) {
+    const { values, size } = distanceField;
+    const searchRadius = size * LOCAL_THICKNESS_SEARCH_RADIUS_RATIO;
+    return sampleLocalThickness(values, size, gridX, gridY, searchRadius);
+  }
+  function traceBoundary(mask, size) {
+    const isForeground = (x, y) => x >= 0 && y >= 0 && x < size && y < size && mask[y * size + x] === 1;
+    const edges = [];
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (!isForeground(x, y)) continue;
+        if (!isForeground(x, y - 1)) edges.push([[x, y], [x + 1, y]]);
+        if (!isForeground(x + 1, y)) edges.push([[x + 1, y], [x + 1, y + 1]]);
+        if (!isForeground(x, y + 1)) edges.push([[x + 1, y + 1], [x, y + 1]]);
+        if (!isForeground(x - 1, y)) edges.push([[x, y + 1], [x, y]]);
+      }
+    }
+    if (edges.length === 0) return null;
+    const key = (p) => `${p[0]},${p[1]}`;
+    const fromMap = /* @__PURE__ */ new Map();
+    for (const edge of edges) {
+      const k = key(edge[0]);
+      if (!fromMap.has(k)) fromMap.set(k, []);
+      fromMap.get(k).push(edge);
+    }
+    const used = /* @__PURE__ */ new Set();
+    const loop = [];
+    let current = edges[0];
+    const startKey = key(current[0]);
+    let guard = edges.length + 1;
+    while (guard-- > 0) {
+      used.add(current);
+      loop.push(current[0]);
+      const nextKey = key(current[1]);
+      if (nextKey === startKey) break;
+      const candidates = (fromMap.get(nextKey) || []).filter((e) => !used.has(e));
+      if (candidates.length === 0) break;
+      current = candidates[0];
+    }
+    return loop.length >= 3 ? loop : null;
+  }
+  function pointLineDistance(p, a, b) {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lengthSq));
+    return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+  }
+  function simplifyDP(points, epsilon) {
+    if (points.length < 3) return points.slice();
+    const first = points[0];
+    const last = points[points.length - 1];
+    let maxDist = 0;
+    let index = 0;
+    for (let i = 1; i < points.length - 1; i++) {
+      const d = pointLineDistance(points[i], first, last);
+      if (d > maxDist) {
+        maxDist = d;
+        index = i;
+      }
+    }
+    if (maxDist <= epsilon) return [first, last];
+    const left = simplifyDP(points.slice(0, index + 1), epsilon);
+    const right = simplifyDP(points.slice(index), epsilon);
+    return left.slice(0, -1).concat(right);
+  }
+  function simplifyClosed(points, epsilon, maxPoints) {
+    if (points.length <= 3) return points;
+    let a = 0;
+    let b = 1;
+    let best = 0;
+    for (let i = 0; i < points.length; i++) {
+      for (let j = i + 1; j < points.length; j++) {
+        const d = Math.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1]);
+        if (d > best) {
+          best = d;
+          a = i;
+          b = j;
+        }
+      }
+    }
+    const chain1 = points.slice(a, b + 1);
+    const chain2 = points.slice(b).concat(points.slice(0, a + 1));
+    let eps = epsilon;
+    let simplified;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const s1 = simplifyDP(chain1, eps);
+      const s2 = simplifyDP(chain2, eps);
+      simplified = s1.slice(0, -1).concat(s2.slice(0, -1));
+      if (simplified.length <= maxPoints) break;
+      eps *= 1.6;
+    }
+    return simplified;
+  }
+  function splineRound(points, sampleCount) {
+    const vectors = points.map(([x, y]) => new Vector3(x, y, 0));
+    const curve = new CatmullRomCurve3(vectors, true, "catmullrom", 0.5);
+    const sampled = curve.getPoints(sampleCount);
+    return sampled.slice(0, -1).map((v) => ({ x: v.x, y: v.y }));
+  }
+  function signedArea2(points) {
+    let area2 = 0;
+    for (let i = 0; i < points.length; i++) {
+      const j = (i + 1) % points.length;
+      area2 += points[i].x * points[j].y - points[j].x * points[i].y;
+    }
+    return area2 / 2;
+  }
+  function ensureCCW(points) {
+    return signedArea2(points) < 0 ? points.slice().reverse() : points;
+  }
+  function extractSilhouette(image) {
+    const raster = rasterizeAlpha(image);
+    if (!hasTransparentBackground(raster)) return null;
+    let mask = binarize(raster.alpha);
+    mask = roundMask(mask, MASK_SIZE);
+    mask = fillEnclosedHoles(mask, MASK_SIZE);
+    mask = keepLargestComponent(mask, MASK_SIZE);
+    const loop = traceBoundary(mask, MASK_SIZE);
+    if (!loop) return null;
+    const simplified = simplifyClosed(loop, SIMPLIFY_EPSILON, SIMPLIFY_MAX_POINTS);
+    const rounded = splineRound(simplified, SPLINE_SAMPLE_COUNT);
+    const half = MASK_SIZE / 2;
+    const oriented = rounded.map((p) => ({ x: p.x - half, y: half - p.y }));
+    return {
+      points: ensureCCW(oriented),
+      imageHalfExtent: { x: raster.drawWidth / 2, y: raster.drawHeight / 2 },
+      distanceField: { values: distanceTransform(mask, MASK_SIZE), size: MASK_SIZE }
+    };
+  }
+
   // src/geometries.js
   function weldAndSmooth(geometry) {
+    geometry.deleteAttribute("normal");
+    geometry.deleteAttribute("uv");
     const welded = mergeVertices(geometry);
     welded.computeVertexNormals();
     return welded;
   }
   function buildSphereGeometry(radius = 1) {
-    const geometry = new IcosahedronGeometry(radius, 4);
-    return weldAndSmooth(geometry);
+    const geometry = weldAndSmooth(new IcosahedronGeometry(radius, 4));
+    geometry.userData.localDepth = radius * 2;
+    geometry.userData.minFeatureRadius = radius;
+    geometry.userData.curvatureSafety = new Float32Array(geometry.attributes.position.count).fill(1);
+    geometry.userData.imageFrameHalfExtent = { x: radius, y: radius };
+    geometry.userData.shellClearance = new Float32Array(geometry.attributes.position.count).fill(Infinity);
+    return geometry;
+  }
+  function boundingRadiusOf(points) {
+    let cx = 0;
+    let cy = 0;
+    for (const p of points) {
+      cx += p.x;
+      cy += p.y;
+    }
+    cx /= points.length;
+    cy /= points.length;
+    let radius = 0;
+    for (const p of points) {
+      const d = Math.hypot(p.x - cx, p.y - cy);
+      if (d > radius) radius = d;
+    }
+    return radius || 1;
+  }
+  var IMAGE_BEVEL_THICKNESS_RATIO = 0.5;
+  var IMAGE_BEVEL_SIZE_RATIO = 0.4;
+  var IMAGE_BEVEL_SEGMENTS = 8;
+  var IMAGE_CORE_DEPTH_RATIO = 0.34;
+  var CAP_DOME_RATIO = 0.18;
+  var CAP_FLATNESS_MIN_NORMAL_Z = 0.9;
+  function domeFlatCaps(geometry, rawRadius, maxBumpHeight) {
+    const pos = geometry.attributes.position;
+    const nrm = geometry.attributes.normal;
+    for (let v = 0; v < pos.count; v++) {
+      const nx = nrm.getX(v);
+      const ny = nrm.getY(v);
+      const nz = nrm.getZ(v);
+      const flatness = MathUtils.smoothstep(Math.abs(nz), CAP_FLATNESS_MIN_NORMAL_Z, 1);
+      if (flatness <= 0) continue;
+      const x = pos.getX(v);
+      const y = pos.getY(v);
+      const distFromAxis = Math.hypot(x, y);
+      const radialFactor = 1 - MathUtils.smoothstep(distFromAxis, 0, rawRadius);
+      const bump = maxBumpHeight * flatness * radialFactor;
+      if (bump === 0) continue;
+      pos.setXYZ(v, x + nx * bump, y + ny * bump, pos.getZ(v) + nz * bump);
+    }
+    pos.needsUpdate = true;
+    geometry.computeVertexNormals();
+  }
+  function computeCurvatureSafety(geometry) {
+    const nrm = geometry.attributes.normal;
+    const safety = new Float32Array(nrm.count);
+    for (let v = 0; v < nrm.count; v++) {
+      safety[v] = MathUtils.smoothstep(Math.abs(nrm.getZ(v)), CAP_FLATNESS_MIN_NORMAL_Z, 1);
+    }
+    return safety;
+  }
+  function computeShellClearance(geometry, distanceField, center, scale) {
+    const pos = geometry.attributes.position;
+    const half = distanceField.size / 2;
+    const result = new Float32Array(pos.count);
+    for (let v = 0; v < pos.count; v++) {
+      const orientedX = pos.getX(v) / scale + center.x;
+      const orientedY = pos.getY(v) / scale + center.y;
+      const gridX = orientedX + half;
+      const gridY = half - orientedY;
+      result[v] = localThicknessAt(distanceField, gridX, gridY) * scale;
+    }
+    return result;
+  }
+  function buildImageGeometry(silhouette, radius = 1) {
+    const { points, imageHalfExtent, distanceField } = silhouette;
+    const rawRadius = boundingRadiusOf(points);
+    const shape = new Shape(points.map((p) => new Vector2(p.x, p.y)));
+    const coreDepth = rawRadius * IMAGE_CORE_DEPTH_RATIO;
+    const bevelThickness = coreDepth * IMAGE_BEVEL_THICKNESS_RATIO;
+    const bevelSize = coreDepth * IMAGE_BEVEL_SIZE_RATIO;
+    let geometry = new ExtrudeGeometry(shape, {
+      depth: coreDepth,
+      bevelEnabled: true,
+      bevelThickness,
+      bevelSize,
+      bevelSegments: IMAGE_BEVEL_SEGMENTS,
+      curveSegments: 1
+      // the shape is already an all-straight-segment polygon (silhouette.js did the curve smoothing) — no extra tessellation needed
+    });
+    geometry = weldAndSmooth(geometry);
+    geometry.computeBoundingBox();
+    const center = new Vector3();
+    geometry.boundingBox.getCenter(center);
+    geometry.translate(-center.x, -center.y, -center.z);
+    domeFlatCaps(geometry, rawRadius, coreDepth * CAP_DOME_RATIO);
+    geometry.computeBoundingSphere();
+    const scale = radius / (geometry.boundingSphere.radius || 1);
+    geometry.scale(scale, scale, scale);
+    geometry.computeBoundingBox();
+    geometry.userData.localDepth = geometry.boundingBox.max.z - geometry.boundingBox.min.z;
+    geometry.userData.minFeatureRadius = Math.min(bevelThickness, bevelSize) * scale;
+    geometry.userData.curvatureSafety = computeCurvatureSafety(geometry);
+    geometry.userData.imageFrameHalfExtent = {
+      x: imageHalfExtent.x * scale,
+      y: imageHalfExtent.y * scale
+    };
+    geometry.userData.shellClearance = computeShellClearance(geometry, distanceField, center, scale);
+    return geometry;
   }
 
   // src/deformable-mesh.js
-  var MAX_PLASTIC_DISPLACEMENT_RATIO = 0.32;
+  var MAX_PLASTIC_DISPLACEMENT_RATIO = 0.16;
   var POKE_DEPTH_RATIO_OF_MAX = 0.72;
   var CRACK_RATE_PER_HIT = 0.55;
   var ELASTIC_DECAY_LAMBDA = 2.6;
   var BREAK_DAMAGE_THRESHOLD = 0.5;
-  var HOLE_RADIUS_RATIO = 0.7;
-  var FRAGMENT_RADIUS_RATIO = 0.18;
+  var HOLE_RADIUS_RATIO = 1.4;
+  var FRAGMENT_RADIUS_RATIO = 0.36;
   var FIRST_BREAK_HOLD_SECONDS = 1.5;
   var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25;
   var REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9;
-  var SHELL_THICKNESS_RATIO = 0.07;
+  var SHELL_THICKNESS_RATIO = 0.035;
+  var SHELL_CLEARANCE_SAFETY_RATIO = 0.6;
+  var RIM_INFLUENCE_SAFETY_RATIO = 0.9;
+  var RIM_DISPLACEMENT_SAFETY_RATIO = 0.5;
+  var NORMAL_ALIGN_GATE_START = -0.1;
+  var NORMAL_ALIGN_GATE_END = 0.3;
   var BULGE_RISE_START_RATIO = 0.6;
   var BULGE_PEAK_RATIO = 1;
   var BULGE_OUTER_RATIO = 1.6;
@@ -31530,29 +31956,49 @@ void main() {
       this.materialMode = "clay";
       geometry.computeBoundingSphere();
       this.radius = geometry.boundingSphere.radius;
-      this.influenceRadius = this.radius * 0.5;
-      this.maxDisplacement = this.radius * MAX_PLASTIC_DISPLACEMENT_RATIO;
-      this.pokeDepth = this.maxDisplacement * POKE_DEPTH_RATIO_OF_MAX;
-      this.shellThickness = this.radius * SHELL_THICKNESS_RATIO;
+      this.localDepth = geometry.userData.localDepth ?? this.radius * 2;
+      const thicknessAxis = Math.min(this.radius * 2, this.localDepth);
+      const minFeatureRadius = geometry.userData.minFeatureRadius ?? this.radius;
+      this.influenceRadiusFlat = this.radius * 0.5;
+      this.influenceRadiusRim = Math.min(this.influenceRadiusFlat, minFeatureRadius * RIM_INFLUENCE_SAFETY_RATIO);
+      this.maxDisplacementFlat = thicknessAxis * MAX_PLASTIC_DISPLACEMENT_RATIO;
+      this.maxDisplacementRim = Math.min(this.maxDisplacementFlat, minFeatureRadius * RIM_DISPLACEMENT_SAFETY_RATIO);
+      this.curvatureSafety = geometry.userData.curvatureSafety ?? new Float32Array(geometry.attributes.position.count).fill(1);
+      this.imageFrameHalfExtent = geometry.userData.imageFrameHalfExtent ?? { x: this.radius, y: this.radius };
+      this.shellThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
       const shellGeometry = geometry;
       const coreGeometry = geometry.clone();
       const shellPositionAttr = shellGeometry.attributes.position;
       this.vertexCount = shellPositionAttr.count;
       const shellRestPosition = shellPositionAttr.array;
-      this.restNormal = new Float32Array(this.vertexCount * 3);
+      const shellClearance = geometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
+      this.localShellThickness = new Float32Array(this.vertexCount);
       for (let v = 0; v < this.vertexCount; v++) {
-        const i3 = v * 3;
-        const x = shellRestPosition[i3];
-        const y = shellRestPosition[i3 + 1];
-        const z = shellRestPosition[i3 + 2];
-        const len = Math.sqrt(x * x + y * y + z * z) || 1;
-        this.restNormal[i3] = x / len;
-        this.restNormal[i3 + 1] = y / len;
-        this.restNormal[i3 + 2] = z / len;
+        this.localShellThickness[v] = Math.min(this.shellThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
+      }
+      const shellNormalAttr = shellGeometry.attributes.normal;
+      this.restNormal = new Float32Array(this.vertexCount * 3);
+      if (shellNormalAttr) {
+        this.restNormal.set(shellNormalAttr.array);
+      } else {
+        for (let v = 0; v < this.vertexCount; v++) {
+          const i3 = v * 3;
+          const x = shellRestPosition[i3];
+          const y = shellRestPosition[i3 + 1];
+          const z = shellRestPosition[i3 + 2];
+          const len = Math.sqrt(x * x + y * y + z * z) || 1;
+          this.restNormal[i3] = x / len;
+          this.restNormal[i3 + 1] = y / len;
+          this.restNormal[i3 + 2] = z / len;
+        }
       }
       this.restPosition = new Float32Array(this.vertexCount * 3);
-      for (let i = 0; i < this.restPosition.length; i++) {
-        this.restPosition[i] = shellRestPosition[i] - this.restNormal[i] * this.shellThickness;
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const t = this.localShellThickness[v];
+        this.restPosition[i3] = shellRestPosition[i3] - this.restNormal[i3] * t;
+        this.restPosition[i3 + 1] = shellRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
+        this.restPosition[i3 + 2] = shellRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
       }
       coreGeometry.attributes.position.array.set(this.restPosition);
       coreGeometry.attributes.position.needsUpdate = true;
@@ -31582,8 +32028,20 @@ void main() {
     }
     /**
      * Given a rough direction from the origin (e.g. a bounding-sphere hit),
-     * returns the actual rest-position vertex most aligned with it — i.e. the
-     * real point on this shape's surface in that direction.
+     * returns the actual rest-position vertex most aligned with it (the real
+     * point on this shape's surface in that direction) together with its real
+     * rest-normal. pointer-interaction.js uses the normal as the poke's push
+     * direction — it used to just normalize the point itself (direction from
+     * origin), which is only ever correct for a sphere (where "away from
+     * center" and "the real surface normal" happen to be the same vector);
+     * on a flat custom shape they can differ a lot (e.g. every point on a flat
+     * face shares one real normal but has a different origin-direction), so
+     * this now returns the actual restNormal instead. Known remaining
+     * approximation: the ARGMAX search below still only looks at "closest
+     * origin-direction", which on a very thin shape can occasionally prefer a
+     * point on the opposite face over the intended one at near-identical
+     * angles — deferred the same way the previous cycle deferred it (tune
+     * later against real photos rather than pre-solving it now).
      */
     surfacePointTowards(direction) {
       const rest = this.restPosition;
@@ -31606,7 +32064,17 @@ void main() {
         }
       }
       const i3 = bestIndex * 3;
-      return new Vector3(rest[i3], rest[i3 + 1], rest[i3 + 2]);
+      const point = new Vector3(rest[i3], rest[i3 + 1], rest[i3 + 2]);
+      const normal = new Vector3(this.restNormal[i3], this.restNormal[i3 + 1], this.restNormal[i3 + 2]);
+      return { point, normal };
+    }
+    /** The dent-footprint radius to use at a vertex with this curvatureSafety (1 = flat cap, 0 = tight rim) — shared by poke() and _checkBreak() so the flat/rim blend formula lives in one place. */
+    _influenceRadiusFor(safety) {
+      return MathUtils.lerp(this.influenceRadiusRim, this.influenceRadiusFlat, safety);
+    }
+    /** Same blend as _influenceRadiusFor, for the permanent-displacement limit — shared by poke() and _clampPlastic(). */
+    _maxDisplacementFor(safety) {
+      return MathUtils.lerp(this.maxDisplacementRim, this.maxDisplacementFlat, safety);
     }
     /**
      * Incremental poke + crack at a clicked point. normal is the outward
@@ -31626,15 +32094,13 @@ void main() {
     poke(pointWorld, normal, strength = 1, holdSeconds = 0) {
       const rest = this.restPosition;
       const restNormal = this.restNormal;
-      const dentRadius = this.influenceRadius;
-      const bulgeRiseStart = dentRadius * BULGE_RISE_START_RATIO;
-      const bulgePeak = dentRadius * BULGE_PEAK_RATIO;
-      const bulgeOuter = dentRadius * BULGE_OUTER_RATIO;
+      const curvatureSafety = this.curvatureSafety;
+      const bulgeOuterMax = this.influenceRadiusFlat * BULGE_OUTER_RATIO;
+      const bulgeOuterMaxSq = bulgeOuterMax * bulgeOuterMax;
       const target = this.materialMode === "slime" ? this.elasticSnapshot : this.plasticOffset;
-      const depth = this.pokeDepth * strength;
-      const dirX = -normal.x * depth;
-      const dirY = -normal.y * depth;
-      const dirZ = -normal.z * depth;
+      const pushX = -normal.x;
+      const pushY = -normal.y;
+      const pushZ = -normal.z;
       if (this.materialMode === "slime") {
         if (!this._elasticHeld) {
           const decay = this.elasticDecay;
@@ -31646,26 +32112,37 @@ void main() {
         this._elasticHeld = true;
       }
       let nearestIndex = 0;
-      let nearestDist = Infinity;
+      let nearestDistSq = Infinity;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
         const dx = rest[i3] - pointWorld.x;
         const dy = rest[i3 + 1] - pointWorld.y;
         const dz = rest[i3 + 2] - pointWorld.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < nearestDist) {
-          nearestDist = dist;
+        const distSq = dx * dx + dy * dy + dz * dz;
+        const alignDot = restNormal[i3] * normal.x + restNormal[i3 + 1] * normal.y + restNormal[i3 + 2] * normal.z;
+        const alignWeight = MathUtils.smoothstep(alignDot, NORMAL_ALIGN_GATE_START, NORMAL_ALIGN_GATE_END);
+        if (alignWeight > 0 && distSq < nearestDistSq) {
+          nearestDistSq = distSq;
           nearestIndex = v;
         }
-        if (dist >= bulgeOuter) continue;
-        const dentWeight = dist < dentRadius ? MathUtils.smoothstep(dentRadius - dist, 0, dentRadius) : 0;
+        if (distSq >= bulgeOuterMaxSq || alignWeight <= 0) continue;
+        const safety = curvatureSafety[v];
+        const dentRadius = this._influenceRadiusFor(safety);
+        const depth = this._maxDisplacementFor(safety) * POKE_DEPTH_RATIO_OF_MAX * strength;
+        const bulgeRiseStart = dentRadius * BULGE_RISE_START_RATIO;
+        const bulgePeak = dentRadius * BULGE_PEAK_RATIO;
+        const bulgeOuter = dentRadius * BULGE_OUTER_RATIO;
+        if (distSq >= bulgeOuter * bulgeOuter) continue;
+        const dist = Math.sqrt(distSq);
+        const dentWeight = MathUtils.smoothstep(dentRadius - dist, 0, dentRadius) * alignWeight;
         let bulgeWeight = 0;
         if (dist > bulgeRiseStart) {
           bulgeWeight = dist < bulgePeak ? MathUtils.smoothstep(dist, bulgeRiseStart, bulgePeak) : 1 - MathUtils.smoothstep(dist, bulgePeak, bulgeOuter);
         }
-        target[i3] += dirX * dentWeight + restNormal[i3] * depth * BULGE_STRENGTH * bulgeWeight;
-        target[i3 + 1] += dirY * dentWeight + restNormal[i3 + 1] * depth * BULGE_STRENGTH * bulgeWeight;
-        target[i3 + 2] += dirZ * dentWeight + restNormal[i3 + 2] * depth * BULGE_STRENGTH * bulgeWeight;
+        bulgeWeight *= alignWeight;
+        target[i3] += pushX * depth * dentWeight + restNormal[i3] * depth * BULGE_STRENGTH * bulgeWeight;
+        target[i3 + 1] += pushY * depth * dentWeight + restNormal[i3 + 1] * depth * BULGE_STRENGTH * bulgeWeight;
+        target[i3 + 2] += pushZ * depth * dentWeight + restNormal[i3 + 2] * depth * BULGE_STRENGTH * bulgeWeight;
         if (dentWeight > 0) {
           const next = this.crackDamage[v] + dentWeight * CRACK_RATE_PER_HIT * strength;
           this.crackDamage[v] = next > 1 ? 1 : next;
@@ -31676,7 +32153,7 @@ void main() {
       }
       this._dirtyPosition = true;
       this._dirtyAttributes = true;
-      return this._checkBreak(pointWorld, nearestIndex, holdSeconds);
+      return this._checkBreak(pointWorld, normal, nearestIndex, holdSeconds);
     }
     /**
      * Decides whether this poke just broke a chunk loose. Guarded by holeMask
@@ -31685,60 +32162,70 @@ void main() {
      * underneath never spawns more debris (also what stops the very hole that
      * just opened from immediately re-triggering next frame).
      */
-    _checkBreak(pointWorld, nearestIndex, holdSeconds) {
+    _checkBreak(pointWorld, normal, nearestIndex, holdSeconds) {
       if (this.holeMask[nearestIndex] > 0.5) return null;
+      const influenceRadius = this._influenceRadiusFor(this.curvatureSafety[nearestIndex]);
       if (!this.hasBrokenOnce) {
         if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
         this.hasBrokenOnce = true;
-        this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
-        this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
-        return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
+        this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
+        this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
+        return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
       }
       if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
-      this._boostCrackAt(pointWorld, this.radius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
-      this._boostHoleAt(pointWorld, this.radius * HOLE_RADIUS_RATIO);
-      return { point: pointWorld.clone(), radius: this.radius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+      this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
+      this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
+      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+    }
+    /**
+     * Shared by _boostCrackAt/_boostHoleAt below, which are otherwise
+     * identical aside from which per-vertex field they raise — the only
+     * difference is passed in as `field`. Gated by normal alignment (see
+     * NORMAL_ALIGN_GATE_* / poke()) so a break on one face of a thin shape
+     * can't also crack/hole the opposite face — without it, a chunk breaking
+     * off the front could punch straight through to the back, which is
+     * exactly the "속이 비어서 반대편이 보이는" symptom this cycle set out to
+     * fix. Only breaks fire this (not every frame), but it still defers the
+     * sqrt past the cheap squared-distance range check, same as poke().
+     */
+    _boostFieldAt(field, pointWorld, normal, radius) {
+      const rest = this.restPosition;
+      const restNormal = this.restNormal;
+      const radiusSq = radius * radius;
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const dx = rest[i3] - pointWorld.x;
+        const dy = rest[i3 + 1] - pointWorld.y;
+        const dz = rest[i3 + 2] - pointWorld.z;
+        const distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq >= radiusSq) continue;
+        const alignDot = restNormal[i3] * normal.x + restNormal[i3 + 1] * normal.y + restNormal[i3 + 2] * normal.z;
+        const alignWeight = MathUtils.smoothstep(alignDot, NORMAL_ALIGN_GATE_START, NORMAL_ALIGN_GATE_END);
+        if (alignWeight <= 0) continue;
+        const dist = Math.sqrt(distSq);
+        const weight = MathUtils.smoothstep(radius - dist, 0, radius) * alignWeight;
+        field[v] = Math.max(field[v], weight);
+      }
+      this._dirtyAttributes = true;
     }
     /** Widens the visible crack network around a point without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. */
-    _boostCrackAt(pointWorld, radius) {
-      const rest = this.restPosition;
-      for (let v = 0; v < this.vertexCount; v++) {
-        const i3 = v * 3;
-        const dx = rest[i3] - pointWorld.x;
-        const dy = rest[i3 + 1] - pointWorld.y;
-        const dz = rest[i3 + 2] - pointWorld.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist >= radius) continue;
-        const weight = MathUtils.smoothstep(radius - dist, 0, radius);
-        this.crackDamage[v] = Math.max(this.crackDamage[v], weight);
-      }
-      this._dirtyAttributes = true;
+    _boostCrackAt(pointWorld, normal, radius) {
+      this._boostFieldAt(this.crackDamage, pointWorld, normal, radius);
     }
     /** Marks the spot a chunk just fell off of as a clean hole in the shell — no crack cosmetics there, and the shell fragment shader discards it so the core shows through. */
-    _boostHoleAt(pointWorld, radius) {
-      const rest = this.restPosition;
-      for (let v = 0; v < this.vertexCount; v++) {
-        const i3 = v * 3;
-        const dx = rest[i3] - pointWorld.x;
-        const dy = rest[i3 + 1] - pointWorld.y;
-        const dz = rest[i3 + 2] - pointWorld.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist >= radius) continue;
-        const weight = MathUtils.smoothstep(radius - dist, 0, radius);
-        this.holeMask[v] = Math.max(this.holeMask[v], weight);
-      }
-      this._dirtyAttributes = true;
+    _boostHoleAt(pointWorld, normal, radius) {
+      this._boostFieldAt(this.holeMask, pointWorld, normal, radius);
     }
+    /** Clamps each vertex's permanent (clay) displacement to ITS OWN safe limit — a single shape-wide clamp would either let a rim vertex fold (if set to the generous flat limit) or needlessly flatten a legitimately deep flat-cap dent (if set to the tight rim limit) just because some OTHER vertex elsewhere happens to be poked next. */
     _clampPlastic() {
       const plastic = this.plasticOffset;
-      const max = this.maxDisplacement;
+      const curvatureSafety = this.curvatureSafety;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const len = Math.sqrt(
-          plastic[i3] * plastic[i3] + plastic[i3 + 1] * plastic[i3 + 1] + plastic[i3 + 2] * plastic[i3 + 2]
-        );
-        if (len > max) {
-          const s = max / len;
+        const max = this._maxDisplacementFor(curvatureSafety[v]);
+        const lenSq = plastic[i3] * plastic[i3] + plastic[i3 + 1] * plastic[i3 + 1] + plastic[i3 + 2] * plastic[i3 + 2];
+        if (lenSq > max * max) {
+          const s = max / Math.sqrt(lenSq);
           plastic[i3] *= s;
           plastic[i3 + 1] *= s;
           plastic[i3 + 2] *= s;
@@ -31777,11 +32264,11 @@ void main() {
       const plastic = this.plasticOffset;
       const elastic = this.elasticSnapshot;
       const decay = this.elasticDecay;
-      const thickness = this.shellThickness;
+      const localShellThickness = this.localShellThickness;
       const holeMask = this.holeMask;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const gap = thickness * (1 - holeMask[v]);
+        const gap = localShellThickness[v] * (1 - holeMask[v]);
         for (let k = 0; k < 3; k++) {
           const idx = i3 + k;
           const corePosition = rest[idx] + plastic[idx] + elastic[idx] * decay;
@@ -31920,7 +32407,7 @@ uniform vec3 waxColor;
 uniform float crackCellFrequency;
 uniform float waxRoughnessBase;
 uniform sampler2D coreMap;
-uniform float projectionScale;
+uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette \u2014 see wax-material.js's setProjectionScale
 uniform float hazeAmount;
 uniform float sparkleAmount;
 ${NOISE}
@@ -31934,7 +32421,16 @@ float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
 float crack = crackLine * crackSpread * (1.0 - vHoleMask);
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
-vec3 hazeColor = texture2D(coreMap, hazeUv).rgb;
+vec4 hazeSample = texture2D(coreMap, hazeUv);
+// A transparent PNG's "invisible" pixels still store SOME rgb (whatever the
+// authoring tool happened to leave there \u2014 often black, or white if the
+// photo started life on a white background that got keyed to alpha 0) \u2014
+// sampling .rgb alone leaked that hidden color once the photo's own true
+// scale (see projectionScale's doc comment) started legitimately reaching
+// those pixels near the silhouette's edge. Blending toward the same neutral
+// gray the app already shows before any photo/color is chosen keeps that
+// hidden color from ever surfacing, without inventing a new "border" look.
+vec3 hazeColor = mix(vec3(0.706), hazeSample.rgb, hazeSample.a);
 float marble = waxMarbleNoise(vObjectPosition * 1.6);
 float haze = clamp(hazeAmount * (0.6 + 0.5 * marble), 0.0, 1.0);
 
@@ -31999,12 +32495,15 @@ vObjectPosition = transformed;
   var CORE_FRAGMENT_COMMON = `#include <common>
 varying vec3 vObjectPosition;
 uniform sampler2D coreMap;
-uniform float projectionScale;
+uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette \u2014 see wax-material.js's setProjectionScale
 `;
   var CORE_FRAGMENT_COLOR = `#include <color_fragment>
 vec2 coreUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
 vec4 coreSample = texture2D(coreMap, coreUv);
-diffuseColor.rgb = coreSample.rgb;
+// Same reasoning as the shell's hazeColor above: blend toward the app's own
+// neutral "no photo" gray wherever the source is transparent, instead of
+// showing whatever rgb happens to be stored under a transparent pixel.
+diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
 `;
 
   // src/wax-material.js
@@ -32020,7 +32519,7 @@ diffuseColor.rgb = coreSample.rgb;
       crackCellFrequency: { value: 3.2 },
       waxRoughnessBase: { value: 0.38 },
       coreMap: { value: makeDefaultCoreTexture() },
-      projectionScale: { value: 1 },
+      projectionScale: { value: new Vector2(1, 1) },
       hazeAmount: { value: 0.45 },
       sparkleAmount: { value: 0 }
     };
@@ -32048,7 +32547,7 @@ diffuseColor.rgb = coreSample.rgb;
   function createCoreMaterial() {
     const uniforms = {
       coreMap: { value: makeDefaultCoreTexture() },
-      projectionScale: { value: 1 }
+      projectionScale: { value: new Vector2(1, 1) }
     };
     const material = new MeshPhysicalMaterial({
       color: 16777215,
@@ -32126,9 +32625,9 @@ diffuseColor.rgb = coreSample.rgb;
     shellMaterial2.userData.waxUniforms.coreMap.value = texture;
     if (old) old.dispose();
   }
-  function setProjectionScale(coreMaterial2, shellMaterial2, scale) {
-    coreMaterial2.userData.waxUniforms.projectionScale.value = scale;
-    shellMaterial2.userData.waxUniforms.projectionScale.value = scale;
+  function setProjectionScale(coreMaterial2, shellMaterial2, { x, y }) {
+    coreMaterial2.userData.waxUniforms.projectionScale.value.set(x, y);
+    shellMaterial2.userData.waxUniforms.projectionScale.value.set(x, y);
   }
 
   // src/pointer-interaction.js
@@ -32136,8 +32635,27 @@ diffuseColor.rgb = coreSample.rgb;
   var MIN_HOLD_STRENGTH = 0.5;
   var MAX_HOLD_STRENGTH = 1.2;
   var HOLD_SECONDS_FOR_MAX_STRENGTH = 1.1;
+  function intersectRayEllipsoid(ray, semiXY, semiZ) {
+    const ox = ray.origin.x / semiXY;
+    const oy = ray.origin.y / semiXY;
+    const oz = ray.origin.z / semiZ;
+    const dx = ray.direction.x / semiXY;
+    const dy = ray.direction.y / semiXY;
+    const dz = ray.direction.z / semiZ;
+    const a = dx * dx + dy * dy + dz * dz;
+    const b = 2 * (ox * dx + oy * dy + oz * dz);
+    const c = ox * ox + oy * oy + oz * oz - 1;
+    const discriminant = b * b - 4 * a * c;
+    if (discriminant < 0) return null;
+    const sqrtDiscriminant = Math.sqrt(discriminant);
+    const t1 = (-b - sqrtDiscriminant) / (2 * a);
+    const t2 = (-b + sqrtDiscriminant) / (2 * a);
+    const t = t1 >= 0 ? t1 : t2;
+    if (t < 0) return null;
+    return ray.origin.clone().addScaledVector(ray.direction, t);
+  }
   var PointerInteraction = class {
-    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap }) {
+    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap, onCrackAttempt }) {
       this.renderer = renderer2;
       this.camera = camera2;
       this.getActiveMesh = getActiveMesh;
@@ -32145,6 +32663,7 @@ diffuseColor.rgb = coreSample.rgb;
       this.onFragmentPop = onFragmentPop;
       this.onPressProgress = onPressProgress;
       this.onShortTap = onShortTap;
+      this.onCrackAttempt = onCrackAttempt;
       this.raycaster = new Raycaster();
       this.ndc = new Vector2();
       this.active = null;
@@ -32164,11 +32683,9 @@ diffuseColor.rgb = coreSample.rgb;
         -((event.clientY - rect.top) / rect.height) * 2 + 1
       );
       this.raycaster.setFromCamera(this.ndc, this.camera);
-      const sphere = mesh.mesh.geometry.boundingSphere;
-      const approx = new Vector3();
-      if (!sphere || !this.raycaster.ray.intersectSphere(sphere, approx)) return;
-      const point = mesh.surfacePointTowards(approx);
-      const normal = point.clone().normalize();
+      const approx = intersectRayEllipsoid(this.raycaster.ray, mesh.radius, mesh.localDepth / 2);
+      if (!approx) return;
+      const { point, normal } = mesh.surfacePointTowards(approx);
       this.active = {
         downX: event.clientX,
         downY: event.clientY,
@@ -32178,6 +32695,9 @@ diffuseColor.rgb = coreSample.rgb;
         appliedStrength: 0,
         soundPlayed: false
       };
+      if (!mesh.hasBrokenOnce) {
+        this.onCrackAttempt?.();
+      }
     };
     _onMove = (event) => {
       if (!this.active) return;
@@ -32350,7 +32870,8 @@ diffuseColor.rgb = coreSample.rgb;
           texture.wrapS = ClampToEdgeWrapping;
           texture.wrapT = ClampToEdgeWrapping;
           texture.needsUpdate = true;
-          resolve(texture);
+          const silhouette = extractSilhouette(image);
+          resolve({ texture, silhouette });
         };
         image.src = reader.result;
       };
@@ -32407,6 +32928,7 @@ diffuseColor.rgb = coreSample.rgb;
       ]
     }
   };
+  var FIRST_ATTEMPT_CRACK_SOUND = "sounds/freesound_community-bamboocracking-78192_[cut_1sec].mp3";
   var templates = {};
   var masterVolume = 1;
   function templateForSrc(src) {
@@ -32426,6 +32948,10 @@ diffuseColor.rgb = coreSample.rgb;
   }
   function setMasterVolume(volume) {
     masterVolume = Math.min(1, Math.max(0, volume));
+  }
+  function playFirstAttemptCrackSound() {
+    if (masterVolume <= 0) return;
+    playOne(FIRST_ATTEMPT_CRACK_SOUND, 1);
   }
   function playMaterialSound(materialMode, waxType, strength = 1, isFirstBreak = false) {
     if (masterVolume <= 0) return;
@@ -32473,10 +32999,16 @@ diffuseColor.rgb = coreSample.rgb;
     photoInput.addEventListener("change", async () => {
       const file = photoInput.files?.[0];
       if (!file) return;
-      await onPhotoChange(file);
-      photoNameLabel.textContent = `\uC0AC\uC9C4: ${file.name}`;
-      removePhotoButton.disabled = false;
-      colorPicker.disabled = true;
+      photoInput.disabled = true;
+      showToast("\uBAA8\uC591 \uB9CC\uB4DC\uB294 \uC911\u2026");
+      try {
+        await onPhotoChange(file);
+        photoNameLabel.textContent = `\uC0AC\uC9C4: ${file.name}`;
+        removePhotoButton.disabled = false;
+        colorPicker.disabled = true;
+      } finally {
+        photoInput.disabled = false;
+      }
     });
     removePhotoButton.addEventListener("click", () => {
       photoInput.value = "";
@@ -32549,13 +33081,24 @@ diffuseColor.rgb = coreSample.rgb;
   var fragments = new FragmentSystem(scene, groundY);
   var currentMaterialMode = "clay";
   var currentWaxType = "basic";
+  var isCustomShape = false;
   var deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
   deformable.setMaterialMode(currentMaterialMode);
   setCoreMaterialMode(coreMaterial, currentMaterialMode);
   setShellLook(shellMaterial, "basic");
-  setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
+  setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
+  function rebuildShape(geometry) {
+    scene.remove(deformable.coreMesh);
+    scene.remove(deformable.mesh);
+    deformable.dispose();
+    deformable = new DeformableMesh(geometry, coreMaterial, shellMaterial);
+    deformable.setMaterialMode(currentMaterialMode);
+    scene.add(deformable.coreMesh);
+    scene.add(deformable.mesh);
+    setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
+  }
   var pressAnticipation = 0;
   var SHORT_TAP_HINT_THRESHOLD = 3;
   var shortTapCount = 0;
@@ -32580,7 +33123,8 @@ diffuseColor.rgb = coreSample.rgb;
         showToast("\uAC15\uD558\uAC8C \uB20C\uB7EC\uC11C \uC641\uC2A4\uB97C \uAE68\uC8FC\uC138\uC694.");
         shortTapCount = 0;
       }
-    }
+    },
+    onCrackAttempt: () => playFirstAttemptCrackSound()
   });
   var needsExtraRender = true;
   function requestRender() {
@@ -32603,11 +33147,23 @@ diffuseColor.rgb = coreSample.rgb;
       requestRender();
     },
     onPhotoChange: async (file) => {
-      const texture = await loadPhotoTexture(file);
+      const { texture, silhouette } = await loadPhotoTexture(file);
       setCoreTexture(coreMaterial, shellMaterial, texture);
+      if (silhouette) {
+        rebuildShape(buildImageGeometry(silhouette));
+        isCustomShape = true;
+      } else if (isCustomShape) {
+        rebuildShape(buildSphereGeometry());
+        isCustomShape = false;
+      }
       requestRender();
     },
     onPhotoRemove: () => {
+      if (isCustomShape) {
+        rebuildShape(buildSphereGeometry());
+        isCustomShape = false;
+        requestRender();
+      }
     },
     onReset: () => {
       deformable.reset();

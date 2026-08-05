@@ -1,5 +1,12 @@
 import * as THREE from 'three';
+import { extractSilhouette } from './silhouette.js';
 
+/**
+ * Resolves to { texture, silhouette }: texture is always usable as-is;
+ * silhouette is null for an ordinary opaque photo (caller should keep/revert
+ * to the plain sphere) or an array of {x, y} points (see silhouette.js) when
+ * the photo has a transparent background worth tracing a custom shape from.
+ */
 export function loadPhotoTexture(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -13,7 +20,9 @@ export function loadPhotoTexture(file) {
         texture.wrapS = THREE.ClampToEdgeWrapping;
         texture.wrapT = THREE.ClampToEdgeWrapping;
         texture.needsUpdate = true;
-        resolve(texture);
+
+        const silhouette = extractSilhouette(image);
+        resolve({ texture, silhouette });
       };
       image.src = reader.result;
     };

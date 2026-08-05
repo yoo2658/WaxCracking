@@ -51,6 +51,15 @@ const WAX_TYPE_SOUND = {
   },
 };
 
+// Played on every pointerdown while a wax hasn't broken once yet — an
+// audible "hairline crack" cue for each attempt at building up to the first
+// dramatic break, not just the break itself (which already has its own
+// sound via playMaterialSound below). Already trimmed to ~1 second by the
+// source file itself, so no explicit stop/fade logic is needed — it simply
+// finishes on its own well before (or right around) the earliest a first
+// break could land.
+const FIRST_ATTEMPT_CRACK_SOUND = 'sounds/freesound_community-bamboocracking-78192_[cut_1sec].mp3';
+
 const templates = {};
 let masterVolume = 1;
 
@@ -73,6 +82,12 @@ function playOne(src, strength) {
 /** volume is 0..1, set from the UI's volume slider. */
 export function setMasterVolume(volume) {
   masterVolume = Math.min(1, Math.max(0, volume));
+}
+
+/** Called from pointer-interaction.js on every pointerdown while the current wax hasn't broken once yet — see FIRST_ATTEMPT_CRACK_SOUND above. */
+export function playFirstAttemptCrackSound() {
+  if (masterVolume <= 0) return;
+  playOne(FIRST_ATTEMPT_CRACK_SOUND, 1);
 }
 
 /**

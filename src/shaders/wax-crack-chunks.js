@@ -129,7 +129,7 @@ uniform vec3 waxColor;
 uniform float crackCellFrequency;
 uniform float waxRoughnessBase;
 uniform sampler2D coreMap;
-uniform float projectionScale;
+uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette — see wax-material.js's setProjectionScale
 uniform float hazeAmount;
 uniform float sparkleAmount;
 ${NOISE}
@@ -159,7 +159,16 @@ float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
 float crack = crackLine * crackSpread * (1.0 - vHoleMask);
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
-vec3 hazeColor = texture2D(coreMap, hazeUv).rgb;
+vec4 hazeSample = texture2D(coreMap, hazeUv);
+// A transparent PNG's "invisible" pixels still store SOME rgb (whatever the
+// authoring tool happened to leave there — often black, or white if the
+// photo started life on a white background that got keyed to alpha 0) —
+// sampling .rgb alone leaked that hidden color once the photo's own true
+// scale (see projectionScale's doc comment) started legitimately reaching
+// those pixels near the silhouette's edge. Blending toward the same neutral
+// gray the app already shows before any photo/color is chosen keeps that
+// hidden color from ever surfacing, without inventing a new "border" look.
+vec3 hazeColor = mix(vec3(0.706), hazeSample.rgb, hazeSample.a);
 float marble = waxMarbleNoise(vObjectPosition * 1.6);
 float haze = clamp(hazeAmount * (0.6 + 0.5 * marble), 0.0, 1.0);
 
@@ -240,7 +249,7 @@ vObjectPosition = transformed;
 export const CORE_FRAGMENT_COMMON = `#include <common>
 varying vec3 vObjectPosition;
 uniform sampler2D coreMap;
-uniform float projectionScale;
+uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette — see wax-material.js's setProjectionScale
 `;
 
 // The core texture is front-projected from the object's own XY position (not
@@ -250,5 +259,8 @@ uniform float projectionScale;
 export const CORE_FRAGMENT_COLOR = `#include <color_fragment>
 vec2 coreUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
 vec4 coreSample = texture2D(coreMap, coreUv);
-diffuseColor.rgb = coreSample.rgb;
+// Same reasoning as the shell's hazeColor above: blend toward the app's own
+// neutral "no photo" gray wherever the source is transparent, instead of
+// showing whatever rgb happens to be stored under a transparent pixel.
+diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
 `;

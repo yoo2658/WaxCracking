@@ -1,5 +1,5 @@
 import { createScene } from './scene.js';
-import { buildSphereGeometry } from './geometries.js';
+import { buildSphereGeometry, buildImageGeometry } from './geometries.js';
 import { DeformableMesh } from './deformable-mesh.js';
 import {
   createCoreMaterial,
@@ -12,7 +12,7 @@ import {
 import { PointerInteraction } from './pointer-interaction.js';
 import { FragmentSystem } from './fragments.js';
 import { loadPhotoTexture, makeColorTexture } from './texture-loader.js';
-import { playMaterialSound, setMasterVolume } from './audio.js';
+import { playMaterialSound, playFirstAttemptCrackSound, setMasterVolume } from './audio.js';
 import { initUI, showToast } from './ui.js';
 import { applyPressAnticipation } from './camera-effects.js';
 
@@ -25,14 +25,28 @@ const shellMaterial = createShellMaterial();
 const fragments = new FragmentSystem(scene, groundY);
 let currentMaterialMode = 'clay';
 let currentWaxType = 'basic';
+let isCustomShape = false; // true once a transparent-background photo has swapped the shape away from the default sphere
 
-const deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
+let deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
 deformable.setMaterialMode(currentMaterialMode);
 setCoreMaterialMode(coreMaterial, currentMaterialMode);
 setShellLook(shellMaterial, 'basic');
-setProjectionScale(coreMaterial, shellMaterial, deformable.radius);
+setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
 scene.add(deformable.coreMesh);
 scene.add(deformable.mesh);
+
+/** Disposes the current shape and replaces it with a new one built from `geometry`, wired to the same core/shell materials and material mode. pointerInteraction/tick reference `deformable` through a closure, so they automatically pick up the new instance without any extra wiring. */
+function rebuildShape(geometry) {
+  scene.remove(deformable.coreMesh);
+  scene.remove(deformable.mesh);
+  deformable.dispose();
+
+  deformable = new DeformableMesh(geometry, coreMaterial, shellMaterial);
+  deformable.setMaterialMode(currentMaterialMode);
+  scene.add(deformable.coreMesh);
+  scene.add(deformable.mesh);
+  setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
+}
 
 let pressAnticipation = 0;
 
@@ -63,6 +77,7 @@ const pointerInteraction = new PointerInteraction({
       shortTapCount = 0;
     }
   },
+  onCrackAttempt: () => playFirstAttemptCrackSound(),
 });
 
 // Set once whenever something outside the per-frame animation checks below
@@ -92,11 +107,25 @@ const { initialColor } = initUI({
     requestRender();
   },
   onPhotoChange: async (file) => {
-    const texture = await loadPhotoTexture(file);
+    const { texture, silhouette } = await loadPhotoTexture(file);
     setCoreTexture(coreMaterial, shellMaterial, texture);
+    if (silhouette) {
+      rebuildShape(buildImageGeometry(silhouette));
+      isCustomShape = true;
+    } else if (isCustomShape) {
+      // Swapped in an opaque photo/color while a custom shape was active — back to the plain sphere.
+      rebuildShape(buildSphereGeometry());
+      isCustomShape = false;
+    }
     requestRender();
   },
-  onPhotoRemove: () => {},
+  onPhotoRemove: () => {
+    if (isCustomShape) {
+      rebuildShape(buildSphereGeometry());
+      isCustomShape = false;
+      requestRender();
+    }
+  },
   onReset: () => {
     deformable.reset();
     fragments.reset();

@@ -37,11 +37,21 @@ export function initUI({
     const file = photoInput.files?.[0];
     if (!file) return;
 
-    await onPhotoChange(file);
-
-    photoNameLabel.textContent = `사진: ${file.name}`;
-    removePhotoButton.disabled = false;
-    colorPicker.disabled = true;
+    // Transparent-background photos trigger a one-shot silhouette
+    // extraction + shape rebuild (see main.js/silhouette.js) — expected to
+    // be quick (well under a second) but not instant, so the input is
+    // briefly disabled and a toast shown rather than leaving the page
+    // looking unresponsive.
+    photoInput.disabled = true;
+    showToast('모양 만드는 중…');
+    try {
+      await onPhotoChange(file);
+      photoNameLabel.textContent = `사진: ${file.name}`;
+      removePhotoButton.disabled = false;
+      colorPicker.disabled = true;
+    } finally {
+      photoInput.disabled = false;
+    }
   });
 
   removePhotoButton.addEventListener('click', () => {
