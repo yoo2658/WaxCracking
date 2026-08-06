@@ -44,10 +44,25 @@ const SHELL_CLEARANCE_SAFETY_RATIO = 0.6;
 
 // How far a poke's footprint/depth are allowed to reach relative to
 // minFeatureRadius (the tightest local curvature anywhere on the shape — see
-// constructor). Both stay well below 1 so even a poke centered exactly on
-// the tightest bend can't displace far enough to fold that bend onto itself.
-const RIM_INFLUENCE_SAFETY_RATIO = 0.9;
-const RIM_DISPLACEMENT_SAFETY_RATIO = 0.5;
+// constructor) — both influenceRadiusRim/maxDisplacementRim are ALSO capped
+// by Math.min(..., influenceRadiusFlat/maxDisplacementFlat) in the
+// constructor, so raising these ratios can only ever bring the rim's own
+// limit UP TO the flat cap's already-sphere-matching limit, never past it.
+// Raised well past 1 on purpose (reported directly: complex silhouettes —
+// lots of rim relative to open flat area — felt noticeably stiffer than a
+// sphere, since a sphere never hits this branch at all) so the rim ends up
+// AT that flat ceiling for ordinary shapes instead of well below it; only an
+// extremely thin sliver (minFeatureRadius near 0) would still end up
+// clamped below the ceiling, as a last-resort backstop rather than the
+// everyday case. This does reopen some risk of a poke folding a very tight
+// bevel — the ratio was originally this low specifically to prevent that —
+// but the mesh is now a single truly-connected surface (see 07_Do.md's
+// position-only weld), so the realistic downside of overshooting here is a
+// visible crease/fold at that one spot, not the disconnected-mesh tearing
+// (front and back visibly pulling apart, exposing whatever's behind) that
+// this ratio originally guarded against — see 2026-08-05/19_Plan.md.
+const RIM_INFLUENCE_SAFETY_RATIO = 3;
+const RIM_DISPLACEMENT_SAFETY_RATIO = 3;
 
 // A poke only affects vertices whose rest-normal roughly agrees with the
 // clicked point's own normal — vertices facing away (dot below the low end)
@@ -604,6 +619,29 @@ export class DeformableMesh {
     this.shellGeometry.attributes.position.needsUpdate = true;
     this.coreGeometry.computeVertexNormals();
     this.shellGeometry.computeVertexNormals();
+  }
+
+  /**
+   * How much of the shell is still visible solid wax, 0-1 — 1 for a
+   * pristine shape, reaching exactly 0 once every last bit is gone.
+   * Deliberately counts vertices past the SAME 0.5 cutoff the shell's own
+   * fragment shader discards at (see wax-crack-chunks.js's
+   * `if (vHoleMask > 0.5) discard;`), not a plain average of the raw
+   * holeMask values — averaging looked "stuck" at a low but nonzero
+   * percentage even once every single point had already crossed that
+   * discard threshold and the shell had become completely invisible,
+   * because holeMask sits anywhere from just-over-0.5 to 1 in a
+   * fully-opened area, not pegged at exactly 1 — a plain mean of those
+   * never quite reaches 0 even though nothing is left on screen. Counting
+   * "past the same line the shader itself discards at" instead means this
+   * reaches 0% at exactly the moment the last visible scrap disappears.
+   */
+  getRemainingWaxRatio() {
+    let remainingCount = 0;
+    for (let v = 0; v < this.vertexCount; v++) {
+      if (this.holeMask[v] <= 0.5) remainingCount++;
+    }
+    return remainingCount / this.vertexCount;
   }
 
   /** Restores a pristine, uncracked wax shape. */

@@ -3,6 +3,21 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const GROUND_Y = -1.35;
 
+// Matches style.css's --bg/--ground-ish tones for each theme — kept here
+// instead of read from CSS since these drive actual THREE.js Color objects
+// (the canvas background/ground plane), not anything the stylesheet reaches.
+const SCENE_THEME_COLORS = {
+  dark: { background: 0x23262e, ground: 0x1a1c22 },
+  light: { background: 0xeceef1, ground: 0xd7dade },
+};
+
+/** Swaps the canvas background and ground-plane color between the dark (default) and light UI themes — see ui.js's theme toggle. */
+export function setSceneTheme(scene, ground, theme) {
+  const colors = SCENE_THEME_COLORS[theme] ?? SCENE_THEME_COLORS.dark;
+  scene.background.set(colors.background);
+  ground.material.color.set(colors.ground);
+}
+
 export function createScene(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -68,5 +83,5 @@ export function createScene(canvas) {
   window.addEventListener('resize', resize);
   resize();
 
-  return { renderer, scene, camera, controls, groundY: GROUND_Y };
+  return { renderer, scene, camera, controls, groundY: GROUND_Y, ground };
 }

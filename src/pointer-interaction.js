@@ -51,7 +51,7 @@ function intersectRayEllipsoid(ray, semiXY, semiZ) {
  * same gesture, it just stops feeding the mesh once a drag is detected.
  */
 export class PointerInteraction {
-  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap, onCrackAttempt }) {
+  constructor({ renderer, camera, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap, onCrackAttempt, onPressStart, onPressCancel }) {
     this.renderer = renderer;
     this.camera = camera;
     this.getActiveMesh = getActiveMesh;
@@ -60,6 +60,8 @@ export class PointerInteraction {
     this.onPressProgress = onPressProgress;
     this.onShortTap = onShortTap;
     this.onCrackAttempt = onCrackAttempt;
+    this.onPressStart = onPressStart;
+    this.onPressCancel = onPressCancel;
 
     this.raycaster = new THREE.Raycaster();
     this.ndc = new THREE.Vector2();
@@ -124,6 +126,14 @@ export class PointerInteraction {
     if (!mesh.hasBrokenOnce) {
       this.onCrackAttempt?.();
     }
+
+    // Counted as a click ("클릭 수") right away, provisionally — a real press
+    // needs to register the instant it starts (e.g. if the wax crosses the
+    // completion line while STILL being held, the summary should already
+    // include this press, not wait for release). _onMove below reverses this
+    // via onPressCancel the moment the gesture turns out to be a camera-
+    // rotate drag instead, so a rotation nets to zero rather than a +1/-0.
+    this.onPressStart?.();
   };
 
   _onMove = (event) => {
@@ -132,6 +142,7 @@ export class PointerInteraction {
     if (moved >= TAP_MAX_MOVEMENT_PX) {
       this.active = null; // hand it off to OrbitControls as a drag
       this.onPressProgress?.(null);
+      this.onPressCancel?.(); // undo the provisional click count from _onDown — this was a rotate, not a press
     }
   };
 

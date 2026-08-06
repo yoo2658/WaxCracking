@@ -1,3 +1,35 @@
+:root {
+  --bg: #23262e;
+  --text: #eef0f4;
+  --text-muted: #9aa1ad;
+  --panel-bg: rgba(20, 22, 28, 0.72);
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --panel-shadow: rgba(0, 0, 0, 0.35);
+  --control-bg: rgba(255, 255, 255, 0.05);
+  --control-bg-hover: rgba(255, 255, 255, 0.1);
+  --control-border: rgba(255, 255, 255, 0.12);
+  --toast-bg: rgba(20, 22, 28, 0.88);
+  --accent: #5ec8f0;
+  --accent-text: #10131a;
+}
+
+:root[data-theme="light"] {
+  /* 일반 모드 — 흰색~밝은 회색 톤. 어두운 모드의 "밝은색 위에 반투명 유리" 언어를
+     그대로 유지하되(같은 알파값의 흰색 대신 검은색 오버레이로), 배경/글자만 뒤집음. */
+  --bg: #f3f4f6;
+  --text: #23262e;
+  --text-muted: #6b7280;
+  --panel-bg: rgba(255, 255, 255, 0.78);
+  --panel-border: rgba(0, 0, 0, 0.1);
+  --panel-shadow: rgba(0, 0, 0, 0.12);
+  --control-bg: rgba(0, 0, 0, 0.04);
+  --control-bg-hover: rgba(0, 0, 0, 0.08);
+  --control-border: rgba(0, 0, 0, 0.1);
+  --toast-bg: rgba(255, 255, 255, 0.92);
+  --accent: #2f8fd1;
+  --accent-text: #ffffff;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -6,9 +38,9 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #23262e;
+  background: var(--bg);
   font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
-  color: #eef0f4;
+  color: var(--text);
 }
 
 #scene-canvas {
@@ -41,19 +73,84 @@ html, body {
   max-width: calc(100vw - 40px);
   padding: 12px 20px;
   border-radius: 12px;
-  background: rgba(20, 22, 28, 0.88);
+  background: var(--toast-bg);
   backdrop-filter: blur(10px);
-  color: #eef0f4;
+  color: var(--text);
   font-size: 14px;
   text-align: center;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s ease;
+  transition: opacity 0.25s ease, background 0.2s ease, color 0.2s ease;
   z-index: 10;
 }
 
 #toast.visible {
   opacity: 1;
+}
+
+/* Live "남은 왁스 n%" readout — always visible, unlike the self-dismissing
+   toast/completion banner, so it sits in its own corner rather than sharing
+   the toast's spot. */
+#wax-progress {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(10px);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  z-index: 5;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+/* A brief celebratory summary once a wax drops to <=10% remaining — same
+   self-dismissing pattern as #toast, but centered and bigger since it's a
+   one-off payoff moment rather than a passing hint. */
+#completion-banner {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  padding: 24px 32px;
+  border-radius: 18px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 16px 40px var(--panel-shadow);
+  color: var(--text);
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease, background 0.2s ease, color 0.2s ease;
+  z-index: 11;
+}
+
+#completion-banner.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  /* Only clickable while actually shown — otherwise it would sit right over
+     the wax (dead center) and silently eat clicks meant for it even while
+     invisible. */
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.completion-title {
+  margin: 0 0 8px;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+#completion-banner p {
+  margin: 4px 0;
+}
+
+#completion-time,
+#completion-clicks {
+  font-size: 14px;
+  color: var(--text-muted);
 }
 
 #ui-wrapper {
@@ -72,17 +169,18 @@ html, body {
   width: 68px;
   height: 68px;
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(20, 22, 28, 0.72);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
   backdrop-filter: blur(10px);
-  color: #eef0f4;
+  color: var(--text);
   font-size: 24px;
   line-height: 1;
   cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 #quick-reset-button:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--control-bg-hover);
 }
 
 #ui {
@@ -90,10 +188,11 @@ html, body {
   min-width: 0;
   padding: 18px;
   border-radius: 16px;
-  background: rgba(20, 22, 28, 0.72);
+  background: var(--panel-bg);
   backdrop-filter: blur(10px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 12px 30px var(--panel-shadow);
   user-select: none;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
 .ui-header {
@@ -115,16 +214,17 @@ html, body {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.08);
-  color: #eef0f4;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 #ui-toggle:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--control-bg-hover);
 }
 
 #ui-body {
@@ -143,7 +243,7 @@ html, body {
   margin: 0 0 8px;
   font-size: 12px;
   font-weight: 600;
-  color: #9aa1ad;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -157,22 +257,22 @@ html, body {
   flex: 1;
   padding: 8px 6px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef0f4;
+  border: 1px solid var(--control-border);
+  background: var(--control-bg);
+  color: var(--text);
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .button-row button:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--control-bg-hover);
 }
 
 .button-row button.active {
-  background: #5ec8f0;
-  border-color: #5ec8f0;
-  color: #10131a;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -187,7 +287,7 @@ html, body {
   width: 40px;
   height: 32px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: none;
   cursor: pointer;
@@ -198,18 +298,19 @@ html, body {
 #reset-button {
   padding: 8px 10px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef0f4;
+  border: 1px solid var(--control-border);
+  background: var(--control-bg);
+  color: var(--text);
   font-size: 13px;
   cursor: pointer;
   text-align: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .file-button:hover,
 #remove-photo:not(:disabled):hover,
 #reset-button:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--control-bg-hover);
 }
 
 #remove-photo:disabled {
@@ -220,12 +321,12 @@ html, body {
 #reset-button {
   width: 100%;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--control-bg-hover);
 }
 
 #volume-slider {
   width: 100%;
-  accent-color: #5ec8f0;
+  accent-color: var(--accent);
   cursor: pointer;
 }
 
@@ -233,7 +334,7 @@ html, body {
   margin: 6px 0 0;
   font-size: 11px;
   line-height: 1.5;
-  color: #9aa1ad;
+  color: var(--text-muted);
 }
 
 #photo-name {

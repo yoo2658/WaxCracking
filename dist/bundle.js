@@ -31357,6 +31357,15 @@ void main() {
 
   // src/scene.js
   var GROUND_Y = -1.35;
+  var SCENE_THEME_COLORS = {
+    dark: { background: 2303534, ground: 1711138 },
+    light: { background: 15527665, ground: 14146270 }
+  };
+  function setSceneTheme(scene2, ground2, theme) {
+    const colors = SCENE_THEME_COLORS[theme] ?? SCENE_THEME_COLORS.dark;
+    scene2.background.set(colors.background);
+    ground2.material.color.set(colors.ground);
+  }
   function createScene(canvas2) {
     const renderer2 = new WebGLRenderer({ canvas: canvas2, antialias: true });
     renderer2.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -31377,13 +31386,13 @@ void main() {
     const rim = new DirectionalLight(12572927, 0.7);
     rim.position.set(-2, -1, -2.5);
     camera2.add(rim);
-    const ground = new Mesh(
+    const ground2 = new Mesh(
       new CircleGeometry(6, 48),
       new MeshStandardMaterial({ color: 1711138, roughness: 0.95 })
     );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = GROUND_Y;
-    scene2.add(ground);
+    ground2.rotation.x = -Math.PI / 2;
+    ground2.position.y = GROUND_Y;
+    scene2.add(ground2);
     const controls2 = new OrbitControls(camera2, renderer2.domElement);
     controls2.target.set(0, 0, 0);
     controls2.enablePan = false;
@@ -31401,7 +31410,7 @@ void main() {
     }
     window.addEventListener("resize", resize);
     resize();
-    return { renderer: renderer2, scene: scene2, camera: camera2, controls: controls2, groundY: GROUND_Y };
+    return { renderer: renderer2, scene: scene2, camera: camera2, controls: controls2, groundY: GROUND_Y, ground: ground2 };
   }
 
   // node_modules/three/examples/jsm/utils/BufferGeometryUtils.js
@@ -31943,8 +31952,8 @@ void main() {
   var REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9;
   var SHELL_THICKNESS_RATIO = 0.035;
   var SHELL_CLEARANCE_SAFETY_RATIO = 0.6;
-  var RIM_INFLUENCE_SAFETY_RATIO = 0.9;
-  var RIM_DISPLACEMENT_SAFETY_RATIO = 0.5;
+  var RIM_INFLUENCE_SAFETY_RATIO = 3;
+  var RIM_DISPLACEMENT_SAFETY_RATIO = 3;
   var NORMAL_ALIGN_GATE_START = -0.1;
   var NORMAL_ALIGN_GATE_END = 0.3;
   var BULGE_RISE_START_RATIO = 0.6;
@@ -32280,6 +32289,28 @@ void main() {
       this.shellGeometry.attributes.position.needsUpdate = true;
       this.coreGeometry.computeVertexNormals();
       this.shellGeometry.computeVertexNormals();
+    }
+    /**
+     * How much of the shell is still visible solid wax, 0-1 — 1 for a
+     * pristine shape, reaching exactly 0 once every last bit is gone.
+     * Deliberately counts vertices past the SAME 0.5 cutoff the shell's own
+     * fragment shader discards at (see wax-crack-chunks.js's
+     * `if (vHoleMask > 0.5) discard;`), not a plain average of the raw
+     * holeMask values — averaging looked "stuck" at a low but nonzero
+     * percentage even once every single point had already crossed that
+     * discard threshold and the shell had become completely invisible,
+     * because holeMask sits anywhere from just-over-0.5 to 1 in a
+     * fully-opened area, not pegged at exactly 1 — a plain mean of those
+     * never quite reaches 0 even though nothing is left on screen. Counting
+     * "past the same line the shader itself discards at" instead means this
+     * reaches 0% at exactly the moment the last visible scrap disappears.
+     */
+    getRemainingWaxRatio() {
+      let remainingCount = 0;
+      for (let v = 0; v < this.vertexCount; v++) {
+        if (this.holeMask[v] <= 0.5) remainingCount++;
+      }
+      return remainingCount / this.vertexCount;
     }
     /** Restores a pristine, uncracked wax shape. */
     reset() {
@@ -32655,7 +32686,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     return ray.origin.clone().addScaledVector(ray.direction, t);
   }
   var PointerInteraction = class {
-    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap, onCrackAttempt }) {
+    constructor({ renderer: renderer2, camera: camera2, getActiveMesh, onPoke, onFragmentPop, onPressProgress, onShortTap, onCrackAttempt, onPressStart, onPressCancel }) {
       this.renderer = renderer2;
       this.camera = camera2;
       this.getActiveMesh = getActiveMesh;
@@ -32664,6 +32695,8 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       this.onPressProgress = onPressProgress;
       this.onShortTap = onShortTap;
       this.onCrackAttempt = onCrackAttempt;
+      this.onPressStart = onPressStart;
+      this.onPressCancel = onPressCancel;
       this.raycaster = new Raycaster();
       this.ndc = new Vector2();
       this.active = null;
@@ -32698,6 +32731,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       if (!mesh.hasBrokenOnce) {
         this.onCrackAttempt?.();
       }
+      this.onPressStart?.();
     };
     _onMove = (event) => {
       if (!this.active) return;
@@ -32705,6 +32739,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       if (moved >= TAP_MAX_MOVEMENT_PX) {
         this.active = null;
         this.onPressProgress?.(null);
+        this.onPressCancel?.();
       }
     };
     _onCancel = () => {
@@ -32982,10 +33017,15 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     onPhotoChange,
     onPhotoRemove,
     onReset,
-    onVolumeChange
+    onVolumeChange,
+    onThemeChange
   }) {
     wireButtonGroup("waxType", onWaxTypeChange);
     wireButtonGroup("material", onMaterialChange);
+    wireButtonGroup("theme", (theme) => {
+      document.documentElement.dataset.theme = theme;
+      onThemeChange?.(theme);
+    });
     const colorPicker = document.getElementById("color-picker");
     const photoInput = document.getElementById("photo-input");
     const removePhotoButton = document.getElementById("remove-photo");
@@ -33030,6 +33070,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       const collapsed = uiPanel.classList.toggle("collapsed");
       uiToggle.textContent = collapsed ? "\u2630" : "\u2715";
     });
+    document.getElementById("completion-banner").addEventListener("click", hideCompletionBanner);
     return { initialColor: colorPicker.value };
   }
   var TOAST_DURATION_MS = 2600;
@@ -33043,6 +33084,27 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       toast.classList.remove("visible");
       toastTimeoutId = null;
     }, TOAST_DURATION_MS);
+  }
+  function updateWaxProgress(ratio) {
+    const value = document.getElementById("wax-progress-value");
+    value.textContent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
+  }
+  var COMPLETION_DURATION_MS = 4500;
+  var completionTimeoutId = null;
+  function hideCompletionBanner() {
+    document.getElementById("completion-banner").classList.remove("visible");
+    if (completionTimeoutId) {
+      clearTimeout(completionTimeoutId);
+      completionTimeoutId = null;
+    }
+  }
+  function showCompletionBanner(seconds, clicks) {
+    const banner = document.getElementById("completion-banner");
+    document.getElementById("completion-time").textContent = `${seconds.toFixed(1)}\uCD08 \uAC78\uB9BC`;
+    document.getElementById("completion-clicks").textContent = `${clicks}\uD68C \uB204\uB984`;
+    banner.classList.add("visible");
+    if (completionTimeoutId) clearTimeout(completionTimeoutId);
+    completionTimeoutId = setTimeout(hideCompletionBanner, COMPLETION_DURATION_MS);
   }
 
   // src/camera-effects.js
@@ -33074,7 +33136,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
 
   // src/main.js
   var canvas = document.getElementById("scene-canvas");
-  var { renderer, scene, camera, controls, groundY } = createScene(canvas);
+  var { renderer, scene, camera, controls, groundY, ground } = createScene(canvas);
   var baseFov = camera.fov;
   var coreMaterial = createCoreMaterial();
   var shellMaterial = createShellMaterial();
@@ -33082,6 +33144,16 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
   var currentMaterialMode = "clay";
   var currentWaxType = "basic";
   var isCustomShape = false;
+  var waxStartTime = null;
+  var clickCount = 0;
+  var completionShown = false;
+  function startNewWaxTracking() {
+    waxStartTime = null;
+    clickCount = 0;
+    completionShown = false;
+    updateWaxProgress(1);
+    hideCompletionBanner();
+  }
   var deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
   deformable.setMaterialMode(currentMaterialMode);
   setCoreMaterialMode(coreMaterial, currentMaterialMode);
@@ -33098,10 +33170,12 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     scene.add(deformable.coreMesh);
     scene.add(deformable.mesh);
     setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
+    startNewWaxTracking();
   }
   var pressAnticipation = 0;
   var SHORT_TAP_HINT_THRESHOLD = 3;
   var shortTapCount = 0;
+  var COMPLETION_REMAINING_THRESHOLD = 0.1;
   var pointerInteraction = new PointerInteraction({
     renderer,
     camera,
@@ -33124,7 +33198,19 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
         shortTapCount = 0;
       }
     },
-    onCrackAttempt: () => playFirstAttemptCrackSound()
+    onCrackAttempt: () => playFirstAttemptCrackSound(),
+    onPressStart: () => {
+      clickCount += 1;
+      if (clickCount === 1) {
+        waxStartTime = performance.now();
+      }
+    },
+    onPressCancel: () => {
+      clickCount -= 1;
+      if (clickCount === 0) {
+        waxStartTime = null;
+      }
+    }
   });
   var needsExtraRender = true;
   function requestRender() {
@@ -33169,9 +33255,14 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       deformable.reset();
       fragments.reset();
       shortTapCount = 0;
+      startNewWaxTracking();
       requestRender();
     },
-    onVolumeChange: (volume) => setMasterVolume(volume)
+    onVolumeChange: (volume) => setMasterVolume(volume),
+    onThemeChange: (theme) => {
+      setSceneTheme(scene, ground, theme);
+      requestRender();
+    }
   });
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
   var lastTime = performance.now();
@@ -33182,6 +33273,14 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     lastTime = now;
     pointerInteraction.update();
     const meshChanged = deformable.update(dt);
+    if (meshChanged) {
+      const remainingRatio = deformable.getRemainingWaxRatio();
+      updateWaxProgress(remainingRatio);
+      if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {
+        completionShown = true;
+        showCompletionBanner((now - waxStartTime) / 1e3, clickCount);
+      }
+    }
     const fragmentsAnimating = fragments.update(dt);
     const cameraChanged = controls.update();
     const pressEffectActive = applyPressAnticipation(camera, baseFov, pressAnticipation, dt);

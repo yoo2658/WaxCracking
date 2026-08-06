@@ -17,9 +17,18 @@ export function initUI({
   onPhotoRemove,
   onReset,
   onVolumeChange,
+  onThemeChange,
 }) {
   wireButtonGroup('waxType', onWaxTypeChange);
   wireButtonGroup('material', onMaterialChange);
+  // The theme itself is CSS-only (a data-theme attribute the stylesheet's
+  // :root[data-theme="light"] override reacts to) — onThemeChange only
+  // exists so main.js can also re-color the 3D canvas background/ground
+  // plane, which CSS can't reach.
+  wireButtonGroup('theme', (theme) => {
+    document.documentElement.dataset.theme = theme;
+    onThemeChange?.(theme);
+  });
 
   const colorPicker = document.getElementById('color-picker');
   const photoInput = document.getElementById('photo-input');
@@ -81,6 +90,10 @@ export function initUI({
     uiToggle.textContent = collapsed ? '☰' : '✕';
   });
 
+  // A tap anywhere on the completion banner dismisses it immediately,
+  // instead of only ever fading out on its own timer.
+  document.getElementById('completion-banner').addEventListener('click', hideCompletionBanner);
+
   return { initialColor: colorPicker.value };
 }
 
@@ -98,4 +111,32 @@ export function showToast(message) {
     toast.classList.remove('visible');
     toastTimeoutId = null;
   }, TOAST_DURATION_MS);
+}
+
+/** Updates the always-visible "남은 왁스 n%" readout. `ratio` is 0-1 (see deformable-mesh.js's getRemainingWaxRatio) — rounded to a whole percent since this updates continuously and decimal places would just flicker. */
+export function updateWaxProgress(ratio) {
+  const value = document.getElementById('wax-progress-value');
+  value.textContent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
+}
+
+const COMPLETION_DURATION_MS = 4500;
+let completionTimeoutId = null;
+
+export function hideCompletionBanner() {
+  document.getElementById('completion-banner').classList.remove('visible');
+  if (completionTimeoutId) {
+    clearTimeout(completionTimeoutId);
+    completionTimeoutId = null;
+  }
+}
+
+/** Shows the one-off "부수기 완료!" summary once a wax drops to <=10% remaining (see main.js) — self-dismissing like showToast after COMPLETION_DURATION_MS, but a click anywhere on it dismisses it immediately too (see initUI wiring its click listener once, below). */
+export function showCompletionBanner(seconds, clicks) {
+  const banner = document.getElementById('completion-banner');
+  document.getElementById('completion-time').textContent = `${seconds.toFixed(1)}초 걸림`;
+  document.getElementById('completion-clicks').textContent = `${clicks}회 누름`;
+  banner.classList.add('visible');
+
+  if (completionTimeoutId) clearTimeout(completionTimeoutId);
+  completionTimeoutId = setTimeout(hideCompletionBanner, COMPLETION_DURATION_MS);
 }

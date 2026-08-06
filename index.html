@@ -9,6 +9,14 @@
 <body>
   <canvas id="scene-canvas"></canvas>
 
+  <div id="wax-progress" aria-hidden="true">남은 왁스 <span id="wax-progress-value">100</span>%</div>
+
+  <div id="completion-banner" role="status" aria-live="polite">
+    <p class="completion-title">부수기 완료!</p>
+    <p id="completion-time"></p>
+    <p id="completion-clicks"></p>
+  </div>
+
   <div id="toast" role="status" aria-live="polite"></div>
 
   <div id="ui-wrapper">
@@ -54,6 +62,14 @@
       <section>
         <h2>볼륨</h2>
         <input type="range" id="volume-slider" min="0" max="100" value="100" />
+      </section>
+
+      <section>
+        <h2>화면</h2>
+        <div class="button-row" data-group="theme">
+          <button type="button" data-value="dark" class="active">다크 모드</button>
+          <button type="button" data-value="light">라이트 모드</button>
+        </div>
       </section>
 
       <section>

@@ -1,4 +1,4 @@
-import { createScene } from './scene.js';
+import { createScene, setSceneTheme } from './scene.js';
 import { buildSphereGeometry, buildImageGeometry } from './geometries.js';
 import { DeformableMesh } from './deformable-mesh.js';
 import {
@@ -13,11 +13,11 @@ import { PointerInteraction } from './pointer-interaction.js';
 import { FragmentSystem } from './fragments.js';
 import { loadPhotoTexture, makeColorTexture } from './texture-loader.js';
 import { playMaterialSound, playFirstAttemptCrackSound, setMasterVolume } from './audio.js';
-import { initUI, showToast } from './ui.js';
+import { initUI, showToast, updateWaxProgress, showCompletionBanner, hideCompletionBanner } from './ui.js';
 import { applyPressAnticipation } from './camera-effects.js';
 
 const canvas = document.getElementById('scene-canvas');
-const { renderer, scene, camera, controls, groundY } = createScene(canvas);
+const { renderer, scene, camera, controls, groundY, ground } = createScene(canvas);
 const baseFov = camera.fov;
 
 const coreMaterial = createCoreMaterial();
@@ -26,6 +26,29 @@ const fragments = new FragmentSystem(scene, groundY);
 let currentMaterialMode = 'clay';
 let currentWaxType = 'basic';
 let isCustomShape = false; // true once a transparent-background photo has swapped the shape away from the default sphere
+
+// "완파" tracking for the current wax only — restarted whenever a fresh,
+// undamaged wax appears (explicit reset, or a shape rebuild — both always
+// start from a fully-intact holeMask). completionShown guards
+// showCompletionBanner so it fires exactly once per wax as it crosses the
+// <=10%-remaining line, not every frame for as long as it stays below that.
+// waxStartTime stays null until the player's first real press on THIS wax
+// (see onPressStart below) — the "X.X초 걸림" summary should measure only
+// active time spent trying to break it, not idle/rotate-only time spent
+// looking at it before ever touching it.
+let waxStartTime = null;
+let clickCount = 0;
+let completionShown = false;
+function startNewWaxTracking() {
+  waxStartTime = null;
+  clickCount = 0;
+  completionShown = false;
+  updateWaxProgress(1);
+  // A still-lingering popup from the PREVIOUS wax (not yet auto-dismissed or
+  // clicked away) would otherwise keep showing that old wax's time/clicks
+  // on top of the fresh one.
+  hideCompletionBanner();
+}
 
 let deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
 deformable.setMaterialMode(currentMaterialMode);
@@ -46,6 +69,7 @@ function rebuildShape(geometry) {
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
   setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
+  startNewWaxTracking();
 }
 
 let pressAnticipation = 0;
@@ -54,6 +78,8 @@ let pressAnticipation = 0;
 // nudge the player toward holding it down instead of just clicking.
 const SHORT_TAP_HINT_THRESHOLD = 3;
 let shortTapCount = 0;
+
+const COMPLETION_REMAINING_THRESHOLD = 0.1; // "부수기 완료" fires once remaining wax drops to <=10%
 
 const pointerInteraction = new PointerInteraction({
   renderer,
@@ -78,6 +104,21 @@ const pointerInteraction = new PointerInteraction({
     }
   },
   onCrackAttempt: () => playFirstAttemptCrackSound(),
+  onPressStart: () => {
+    clickCount += 1;
+    // The 0->1 transition is this wax's first real press (provisionally —
+    // onPressCancel below undoes it if this turns out to be a camera-rotate
+    // drag instead), so that's the moment the elapsed-time clock starts.
+    if (clickCount === 1) {
+      waxStartTime = performance.now();
+    }
+  },
+  onPressCancel: () => {
+    clickCount -= 1;
+    if (clickCount === 0) {
+      waxStartTime = null; // that provisional first press was actually a rotate — no real press has happened yet
+    }
+  },
 });
 
 // Set once whenever something outside the per-frame animation checks below
@@ -130,9 +171,14 @@ const { initialColor } = initUI({
     deformable.reset();
     fragments.reset();
     shortTapCount = 0;
+    startNewWaxTracking();
     requestRender();
   },
   onVolumeChange: (volume) => setMasterVolume(volume),
+  onThemeChange: (theme) => {
+    setSceneTheme(scene, ground, theme);
+    requestRender();
+  },
 });
 
 setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
@@ -153,6 +199,14 @@ function tick() {
   // Each already tracks whether it actually changed anything this frame —
   // reuse that instead of redrawing on every tick regardless.
   const meshChanged = deformable.update(dt);
+  if (meshChanged) {
+    const remainingRatio = deformable.getRemainingWaxRatio();
+    updateWaxProgress(remainingRatio);
+    if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {
+      completionShown = true;
+      showCompletionBanner((now - waxStartTime) / 1000, clickCount);
+    }
+  }
   const fragmentsAnimating = fragments.update(dt);
   const cameraChanged = controls.update();
   // Applied after controls.update() so OrbitControls' own damped position
