@@ -106,9 +106,12 @@ html, body {
   transition: background 0.2s ease, color 0.2s ease;
 }
 
-/* A brief celebratory summary once a wax drops to <=10% remaining — same
-   self-dismissing pattern as #toast, but centered and bigger since it's a
-   one-off payoff moment rather than a passing hint. */
+/* A one-off celebratory summary once a wax drops to <=10% remaining —
+   centered and bigger than #toast since it's a payoff moment, not a passing
+   hint. Stays up until explicitly closed (see #completion-close) rather than
+   fading on its own timer or dismissing on any stray tap — on mobile,
+   continuing to poke at the wax right underneath it was closing it almost
+   instantly. */
 #completion-banner {
   position: fixed;
   top: 50%;
@@ -130,11 +133,35 @@ html, body {
 #completion-banner.visible {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
-  /* Only clickable while actually shown — otherwise it would sit right over
-     the wax (dead center) and silently eat clicks meant for it even while
-     invisible. */
-  pointer-events: auto;
+}
+
+/* The banner itself stays non-interactive even while visible (pointer-events:
+   none, above) — taps pass through to the wax underneath. Only this close
+   button opts back into pointer-events (see the rule just below), so it's
+   the one deliberate way to dismiss the summary rather than any stray tap
+   near the middle of the screen closing it instantly. */
+#completion-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+#completion-banner.visible #completion-close {
+  pointer-events: auto;
+}
+
+#completion-close:hover {
+  background: var(--control-bg-hover);
 }
 
 .completion-title {
@@ -192,7 +219,19 @@ html, body {
   backdrop-filter: blur(10px);
   box-shadow: 0 12px 30px var(--panel-shadow);
   user-select: none;
-  transition: background 0.2s ease, box-shadow 0.2s ease;
+  transition: background 0.2s ease, box-shadow 0.2s ease, width 0.15s ease, padding 0.15s ease, border-radius 0.15s ease;
+}
+
+/* Collapsed: same 68x68 square as #quick-reset-button, not a shrunken bar —
+   the header's own title text is hidden and its toggle button (below)
+   expands to fill the whole square, so the two buttons read as one
+   consistent size/shape side by side. */
+#ui.collapsed {
+  width: 68px;
+  height: 68px;
+  padding: 0;
+  border-radius: 14px;
+  overflow: hidden;
 }
 
 .ui-header {
@@ -202,11 +241,20 @@ html, body {
   gap: 12px;
 }
 
+#ui.collapsed .ui-header {
+  width: 100%;
+  height: 100%;
+}
+
 #ui h1 {
   margin: 0;
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.02em;
+}
+
+#ui.collapsed h1 {
+  display: none;
 }
 
 #ui-toggle {
@@ -225,6 +273,15 @@ html, body {
 
 #ui-toggle:hover {
   background: var(--control-bg-hover);
+}
+
+#ui.collapsed #ui-toggle {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  font-size: 24px;
 }
 
 #ui-body {

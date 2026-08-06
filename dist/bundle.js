@@ -33070,7 +33070,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       const collapsed = uiPanel.classList.toggle("collapsed");
       uiToggle.textContent = collapsed ? "\u2630" : "\u2715";
     });
-    document.getElementById("completion-banner").addEventListener("click", hideCompletionBanner);
+    document.getElementById("completion-close").addEventListener("click", hideCompletionBanner);
     return { initialColor: colorPicker.value };
   }
   var TOAST_DURATION_MS = 2600;
@@ -33089,22 +33089,14 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     const value = document.getElementById("wax-progress-value");
     value.textContent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
   }
-  var COMPLETION_DURATION_MS = 4500;
-  var completionTimeoutId = null;
   function hideCompletionBanner() {
     document.getElementById("completion-banner").classList.remove("visible");
-    if (completionTimeoutId) {
-      clearTimeout(completionTimeoutId);
-      completionTimeoutId = null;
-    }
   }
   function showCompletionBanner(seconds, clicks) {
     const banner = document.getElementById("completion-banner");
     document.getElementById("completion-time").textContent = `${seconds.toFixed(1)}\uCD08 \uAC78\uB9BC`;
     document.getElementById("completion-clicks").textContent = `${clicks}\uD68C \uB204\uB984`;
     banner.classList.add("visible");
-    if (completionTimeoutId) clearTimeout(completionTimeoutId);
-    completionTimeoutId = setTimeout(hideCompletionBanner, COMPLETION_DURATION_MS);
   }
 
   // src/camera-effects.js

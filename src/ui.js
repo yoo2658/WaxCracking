@@ -90,9 +90,10 @@ export function initUI({
     uiToggle.textContent = collapsed ? '☰' : '✕';
   });
 
-  // A tap anywhere on the completion banner dismisses it immediately,
-  // instead of only ever fading out on its own timer.
-  document.getElementById('completion-banner').addEventListener('click', hideCompletionBanner);
+  // Only this dedicated close button dismisses the completion summary — see
+  // hideCompletionBanner's own comment for why the banner no longer reacts
+  // to taps anywhere on it or fades out on a timer.
+  document.getElementById('completion-close').addEventListener('click', hideCompletionBanner);
 
   return { initialColor: colorPicker.value };
 }
@@ -119,24 +120,15 @@ export function updateWaxProgress(ratio) {
   value.textContent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
 }
 
-const COMPLETION_DURATION_MS = 4500;
-let completionTimeoutId = null;
-
+/** Hides the completion summary — the only way it goes away, now that it no longer fades out on its own timer (that made a stray tap near screen-center, e.g. while still trying to poke the wax, dismiss it near-instantly on mobile) or dismisses on a tap anywhere on it. See #completion-close in index.html/style.css. */
 export function hideCompletionBanner() {
   document.getElementById('completion-banner').classList.remove('visible');
-  if (completionTimeoutId) {
-    clearTimeout(completionTimeoutId);
-    completionTimeoutId = null;
-  }
 }
 
-/** Shows the one-off "부수기 완료!" summary once a wax drops to <=10% remaining (see main.js) — self-dismissing like showToast after COMPLETION_DURATION_MS, but a click anywhere on it dismisses it immediately too (see initUI wiring its click listener once, below). */
+/** Shows the one-off "부수기 완료!" summary once a wax drops to <=10% remaining (see main.js). Stays up until hideCompletionBanner is called from the close button. */
 export function showCompletionBanner(seconds, clicks) {
   const banner = document.getElementById('completion-banner');
   document.getElementById('completion-time').textContent = `${seconds.toFixed(1)}초 걸림`;
   document.getElementById('completion-clicks').textContent = `${clicks}회 누름`;
   banner.classList.add('visible');
-
-  if (completionTimeoutId) clearTimeout(completionTimeoutId);
-  completionTimeoutId = setTimeout(hideCompletionBanner, COMPLETION_DURATION_MS);
 }
