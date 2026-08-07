@@ -31940,10 +31940,71 @@ void main() {
   }
 
   // src/deformable-mesh.js
+  function waxHash3(x, y, z) {
+    const hx = x * 127.1 + y * 311.7 + z * 74.7;
+    const hy = x * 269.5 + y * 183.3 + z * 246.1;
+    const hz = x * 113.5 + y * 271.9 + z * 124.6;
+    return [fractSin(hx), fractSin(hy), fractSin(hz)];
+  }
+  function fractSin(v) {
+    const s = Math.sin(v) * 43758.5453123;
+    return s - Math.floor(s);
+  }
+  function waxVoronoiCellId(px2, py2, pz2) {
+    const cx = Math.floor(px2);
+    const cy = Math.floor(py2);
+    const cz = Math.floor(pz2);
+    const lx = px2 - cx;
+    const ly = py2 - cy;
+    const lz = pz2 - cz;
+    let best = Infinity;
+    let bestX = cx;
+    let bestY = cy;
+    let bestZ = cz;
+    for (let k = -1; k <= 1; k++) {
+      for (let j = -1; j <= 1; j++) {
+        for (let i = -1; i <= 1; i++) {
+          const hx = cx + i;
+          const hy = cy + j;
+          const hz = cz + k;
+          const h = waxHash3(hx, hy, hz);
+          const fx = i + h[0];
+          const fy = j + h[1];
+          const fz = k + h[2];
+          const dx = fx - lx;
+          const dy = fy - ly;
+          const dz = fz - lz;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (d < best) {
+            best = d;
+            bestX = hx;
+            bestY = hy;
+            bestZ = hz;
+          }
+        }
+      }
+    }
+    return [bestX, bestY, bestZ];
+  }
+  var CELL_REVEAL_FREQUENCY = 3.2;
+  var CONTAINMENT_GRID_LAT_BINS = 18;
+  var CONTAINMENT_GRID_LON_BINS = 36;
+  function containmentBinIndex(x, y, z) {
+    const len = Math.sqrt(x * x + y * y + z * z) || 1;
+    const lat = Math.acos(Math.min(1, Math.max(-1, y / len)));
+    const lon = Math.atan2(z, x);
+    let latBin = Math.floor(lat / Math.PI * CONTAINMENT_GRID_LAT_BINS);
+    if (latBin >= CONTAINMENT_GRID_LAT_BINS) latBin = CONTAINMENT_GRID_LAT_BINS - 1;
+    let lonBin = Math.floor((lon + Math.PI) / (Math.PI * 2) * CONTAINMENT_GRID_LON_BINS);
+    if (lonBin < 0) lonBin = 0;
+    else if (lonBin >= CONTAINMENT_GRID_LON_BINS) lonBin = CONTAINMENT_GRID_LON_BINS - 1;
+    return latBin * CONTAINMENT_GRID_LON_BINS + lonBin;
+  }
   var MAX_PLASTIC_DISPLACEMENT_RATIO = 0.16;
   var POKE_DEPTH_RATIO_OF_MAX = 0.72;
   var CRACK_RATE_PER_HIT = 0.55;
-  var ELASTIC_DECAY_LAMBDA = 2.6;
+  var ELASTIC_DECAY_LAMBDA = { slime: 2.6, waxbbu: 0.6 };
+  var DEFAULT_ELASTIC_DECAY_LAMBDA = 2.6;
   var BREAK_DAMAGE_THRESHOLD = 0.5;
   var HOLE_RADIUS_RATIO = 1.4;
   var FRAGMENT_RADIUS_RATIO = 0.36;
@@ -31951,7 +32012,8 @@ void main() {
   var FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25;
   var REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9;
   var SHELL_THICKNESS_RATIO = 0.035;
-  var SHELL_CLEARANCE_SAFETY_RATIO = 0.6;
+  var FILLING_INSET_RATIO = 0.02;
+  var SHELL_CLEARANCE_SAFETY_RATIO = 0.8;
   var RIM_INFLUENCE_SAFETY_RATIO = 3;
   var RIM_DISPLACEMENT_SAFETY_RATIO = 3;
   var NORMAL_ALIGN_GATE_START = -0.1;
@@ -31961,8 +32023,36 @@ void main() {
   var BULGE_OUTER_RATIO = 1.6;
   var BULGE_STRENGTH = 0.5;
   var DeformableMesh = class {
-    constructor(geometry, coreMaterial2, shellMaterial2) {
+    /**
+     * containmentRadiusPerVertex (default null — a no-op for every existing
+     * caller) caps how far EACH vertex's final position can end up from the
+     * origin, indexed by that vertex's own direction (see
+     * buildContainmentFromGrid) — see _rebuildPositions(). Only ever set for
+     * "왁뿌볼" + a custom shape's CORE instance (see composite-waxbbu-mesh.js):
+     * once that core deforms plastic (permanent, clay-like — "속에 있는 왁스는
+     * 클레이처럼 뭉개지면 좋겠어") instead of its usual elastic spring-back,
+     * its accumulated dent/bulge is no longer automatically bounded by a shell
+     * that's DERIVED from it (the way the shared-topology single-mesh setup
+     * always guaranteed) — the shell is a totally independent sphere here, so
+     * nothing stops a deep enough plastic bulge from poking past it without
+     * this.
+     *
+     * Deliberately PER-VERTEX/per-direction, not one shared scalar. An earlier
+     * version used a single global value — the shell's one closest-to-origin
+     * point, found anywhere across its ENTIRE surface — and clamped every core
+     * vertex against that same number. The instant the shell dented deeply at
+     * just the one spot being pressed, that global minimum collapsed, and the
+     * clamp then shrank the whole core/filling toward the origin, not only the
+     * part actually near the press — confirmed directly: pressing anywhere
+     * shrank the ENTIRE inner wax ball ("누를 때마다 속에 있는 왁스와 속재질이
+     * 엄청 쪼그라드는데"), not just the pressed side. A per-direction cap fixes
+     * this: a vertex whose own direction's patch of shell is untouched keeps
+     * that patch's own (much larger) radius as its limit, regardless of how
+     * dented some unrelated other spot on the shell currently is.
+     */
+    constructor(geometry, coreMaterial2, shellMaterial2, fillingMaterial2) {
       this.materialMode = "clay";
+      this.containmentRadiusPerVertex = null;
       geometry.computeBoundingSphere();
       this.radius = geometry.boundingSphere.radius;
       this.localDepth = geometry.userData.localDepth ?? this.radius * 2;
@@ -31975,8 +32065,10 @@ void main() {
       this.curvatureSafety = geometry.userData.curvatureSafety ?? new Float32Array(geometry.attributes.position.count).fill(1);
       this.imageFrameHalfExtent = geometry.userData.imageFrameHalfExtent ?? { x: this.radius, y: this.radius };
       this.shellThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
+      this.fillingInset = thicknessAxis * FILLING_INSET_RATIO;
       const shellGeometry = geometry;
       const coreGeometry = geometry.clone();
+      const fillingGeometry = geometry.clone();
       const shellPositionAttr = shellGeometry.attributes.position;
       this.vertexCount = shellPositionAttr.count;
       const shellRestPosition = shellPositionAttr.array;
@@ -32012,28 +32104,59 @@ void main() {
       coreGeometry.attributes.position.array.set(this.restPosition);
       coreGeometry.attributes.position.needsUpdate = true;
       coreGeometry.computeVertexNormals();
+      this.cellRevealThreshold = new Float32Array(this.vertexCount);
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const cellId = waxVoronoiCellId(
+          this.restPosition[i3] * CELL_REVEAL_FREQUENCY,
+          this.restPosition[i3 + 1] * CELL_REVEAL_FREQUENCY,
+          this.restPosition[i3 + 2] * CELL_REVEAL_FREQUENCY
+        );
+        this.cellRevealThreshold[v] = waxHash3(cellId[0], cellId[1], cellId[2])[1];
+      }
+      this.globalRevealProgress = 0;
+      const fillingRestPosition = new Float32Array(this.vertexCount * 3);
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        fillingRestPosition[i3] = this.restPosition[i3] - this.restNormal[i3] * this.fillingInset;
+        fillingRestPosition[i3 + 1] = this.restPosition[i3 + 1] - this.restNormal[i3 + 1] * this.fillingInset;
+        fillingRestPosition[i3 + 2] = this.restPosition[i3 + 2] - this.restNormal[i3 + 2] * this.fillingInset;
+      }
+      fillingGeometry.attributes.position.array.set(fillingRestPosition);
+      fillingGeometry.attributes.position.needsUpdate = true;
+      fillingGeometry.computeVertexNormals();
       this.plasticOffset = new Float32Array(this.vertexCount * 3);
       this.elasticSnapshot = new Float32Array(this.vertexCount * 3);
       this.elasticDecay = 0;
       this._elasticHeld = false;
       const crackDamage = new Float32Array(this.vertexCount);
       shellGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
+      coreGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
       this.crackDamage = crackDamage;
       const holeMask = new Float32Array(this.vertexCount);
       shellGeometry.setAttribute("holeMask", new BufferAttribute(holeMask, 1));
+      coreGeometry.setAttribute("holeMask", new BufferAttribute(holeMask, 1));
       this.holeMask = holeMask;
+      this._localHoleMask = new Float32Array(this.vertexCount);
       this.coreGeometry = coreGeometry;
       this.shellGeometry = shellGeometry;
+      this.fillingGeometry = fillingGeometry;
       this.coreMesh = new Mesh(coreGeometry, coreMaterial2);
       this.coreMesh.matrixAutoUpdate = false;
       this.mesh = new Mesh(shellGeometry, shellMaterial2);
       this.mesh.matrixAutoUpdate = false;
+      this.fillingMesh = new Mesh(fillingGeometry, fillingMaterial2);
+      this.fillingMesh.matrixAutoUpdate = false;
       this._dirtyPosition = false;
       this._dirtyAttributes = false;
       this.hasBrokenOnce = false;
     }
     setMaterialMode(mode) {
       this.materialMode = mode;
+    }
+    /** Both 'slime' and 'waxbbu' spring back to rest (elasticSnapshot) instead of denting permanently (plasticOffset, clay only) — see poke()/update(). */
+    _isElastic() {
+      return this.materialMode === "slime" || this.materialMode === "waxbbu";
     }
     /**
      * Given a rough direction from the origin (e.g. a bounding-sphere hit),
@@ -32081,7 +32204,7 @@ void main() {
     _influenceRadiusFor(safety) {
       return MathUtils.lerp(this.influenceRadiusRim, this.influenceRadiusFlat, safety);
     }
-    /** Same blend as _influenceRadiusFor, for the permanent-displacement limit — shared by poke() and _clampPlastic(). */
+    /** Same blend as _influenceRadiusFor, for the displacement limit — shared by poke() and _clampDisplacement(). */
     _maxDisplacementFor(safety) {
       return MathUtils.lerp(this.maxDisplacementRim, this.maxDisplacementFlat, safety);
     }
@@ -32106,11 +32229,12 @@ void main() {
       const curvatureSafety = this.curvatureSafety;
       const bulgeOuterMax = this.influenceRadiusFlat * BULGE_OUTER_RATIO;
       const bulgeOuterMaxSq = bulgeOuterMax * bulgeOuterMax;
-      const target = this.materialMode === "slime" ? this.elasticSnapshot : this.plasticOffset;
+      const isElastic = this._isElastic();
+      const target = isElastic ? this.elasticSnapshot : this.plasticOffset;
       const pushX = -normal.x;
       const pushY = -normal.y;
       const pushZ = -normal.z;
-      if (this.materialMode === "slime") {
+      if (isElastic) {
         if (!this._elasticHeld) {
           const decay = this.elasticDecay;
           if (decay > 0 && decay < 1) {
@@ -32157,9 +32281,7 @@ void main() {
           this.crackDamage[v] = next > 1 ? 1 : next;
         }
       }
-      if (this.materialMode !== "slime") {
-        this._clampPlastic();
-      }
+      this._clampDisplacement(target);
       this._dirtyPosition = true;
       this._dirtyAttributes = true;
       return this._checkBreak(pointWorld, normal, nearestIndex, holdSeconds);
@@ -32221,23 +32343,46 @@ void main() {
     _boostCrackAt(pointWorld, normal, radius) {
       this._boostFieldAt(this.crackDamage, pointWorld, normal, radius);
     }
-    /** Marks the spot a chunk just fell off of as a clean hole in the shell — no crack cosmetics there, and the shell fragment shader discards it so the core shows through. */
+    /** Marks the spot a chunk just fell off of as a clean hole — no crack cosmetics there, and the shader discards it so what's underneath shows through. Writes to _localHoleMask, NOT the GPU-facing holeMask directly — see that field's own doc comment; update()'s _applyGlobalReveal merges the two every frame. */
     _boostHoleAt(pointWorld, normal, radius) {
-      this._boostFieldAt(this.holeMask, pointWorld, normal, radius);
+      this._boostFieldAt(this._localHoleMask, pointWorld, normal, radius);
     }
-    /** Clamps each vertex's permanent (clay) displacement to ITS OWN safe limit — a single shape-wide clamp would either let a rim vertex fold (if set to the generous flat limit) or needlessly flatten a legitimately deep flat-cap dent (if set to the tight rim limit) just because some OTHER vertex elsewhere happens to be poked next. */
-    _clampPlastic() {
-      const plastic = this.plasticOffset;
+    /**
+     * Clamps each vertex's displacement field to ITS OWN safe limit
+     * (_maxDisplacementFor) — a single shape-wide clamp would either let a rim
+     * vertex fold (if set to the generous flat limit) or needlessly flatten a
+     * legitimately deep flat-cap dent (if set to the tight rim limit) just
+     * because some OTHER vertex elsewhere happens to be poked next.
+     *
+     * Shared by BOTH plasticOffset (clay, permanent) and elasticSnapshot
+     * (slime/왁뿌볼, springs back) — elastic needs the exact same ceiling for a
+     * related but distinct reason: elasticSnapshot's own "bake in the current
+     * decay fraction on a fresh hold" logic (see poke() above) means several
+     * SEPARATE presses at the same spot, each starting before the previous one
+     * has fully sprung back, keep ADDING more depth on top of whatever's left.
+     * Before this was shared, elastic went through poke() completely
+     * unclamped, so enough repeated same-spot presses could dent a vertex
+     * arbitrarily deep with no limit at all. For the usual single
+     * shared-topology mesh that just looked like an extreme (if ugly) dent;
+     * for composite-waxbbu-mesh.js's independent bubble+wax structure it was
+     * far worse — confirmed directly, 20 repeated same-spot presses caved the
+     * bubble's shell in to within 0.02 of the ORIGIN, and since the wax
+     * inside is contained relative to the shell's own live radius (see
+     * getRadialRadiusGrid), that near-zero radius became the wax's own
+     * containment limit in that one direction, visibly tearing it open there
+     * even though the wax's own displacement was never itself excessive.
+     */
+    _clampDisplacement(target) {
       const curvatureSafety = this.curvatureSafety;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
         const max = this._maxDisplacementFor(curvatureSafety[v]);
-        const lenSq = plastic[i3] * plastic[i3] + plastic[i3 + 1] * plastic[i3 + 1] + plastic[i3 + 2] * plastic[i3 + 2];
+        const lenSq = target[i3] * target[i3] + target[i3 + 1] * target[i3 + 1] + target[i3 + 2] * target[i3 + 2];
         if (lenSq > max * max) {
           const s = max / Math.sqrt(lenSq);
-          plastic[i3] *= s;
-          plastic[i3 + 1] *= s;
-          plastic[i3 + 2] *= s;
+          target[i3] *= s;
+          target[i3 + 1] *= s;
+          target[i3 + 2] *= s;
         }
       }
     }
@@ -32247,11 +32392,15 @@ void main() {
       if (this._elasticHeld) {
         this._elasticHeld = false;
       } else if (this.elasticDecay > 0) {
-        this.elasticDecay = MathUtils.damp(this.elasticDecay, 0, ELASTIC_DECAY_LAMBDA, dt);
+        const lambda = ELASTIC_DECAY_LAMBDA[this.materialMode] ?? DEFAULT_ELASTIC_DECAY_LAMBDA;
+        this.elasticDecay = MathUtils.damp(this.elasticDecay, 0, lambda, dt);
         if (this.elasticDecay < 2e-3) {
           this.elasticDecay = 0;
           this.elasticSnapshot.fill(0);
         }
+        needsPositionRebuild = true;
+      }
+      if (this._dirtyAttributes && this._applyGlobalReveal()) {
         needsPositionRebuild = true;
       }
       if (needsPositionRebuild) {
@@ -32260,35 +32409,86 @@ void main() {
       if (this._dirtyAttributes) {
         this.shellGeometry.attributes.crackDamage.needsUpdate = true;
         this.shellGeometry.attributes.holeMask.needsUpdate = true;
+        this.coreGeometry.attributes.crackDamage.needsUpdate = true;
+        this.coreGeometry.attributes.holeMask.needsUpdate = true;
         this._dirtyAttributes = false;
       }
       this._dirtyPosition = false;
       return needsPositionRebuild;
     }
+    /**
+     * Merges the "왁스가 여기저기 사라지는" global reveal into the real,
+     * GPU/gameplay-facing holeMask (see that field's own doc comment) — a
+     * vertex becomes gone there the moment EITHER a real local break covers it
+     * (_localHoleMask) OR its own fixed cellRevealThreshold is crossed by
+     * globalRevealProgress, which is itself driven by getLocalRemainingRatio()
+     * — LOCAL-only progress, so revealing more cells here can never feed back
+     * into revealing even more (no runaway cascade). Returns true if any
+     * vertex's merged value actually changed this call.
+     */
+    _applyGlobalReveal() {
+      this.globalRevealProgress = 1 - this.getLocalRemainingRatio();
+      const threshold = this.cellRevealThreshold;
+      const local = this._localHoleMask;
+      const hole = this.holeMask;
+      const progress = this.globalRevealProgress;
+      let changed = false;
+      for (let v = 0; v < this.vertexCount; v++) {
+        const merged = threshold[v] < progress ? 1 : local[v];
+        if (merged !== hole[v]) {
+          hole[v] = merged;
+          changed = true;
+        }
+      }
+      return changed;
+    }
     _rebuildPositions() {
       const corePos = this.coreGeometry.attributes.position.array;
       const shellPos = this.shellGeometry.attributes.position.array;
+      const fillingPos = this.fillingGeometry.attributes.position.array;
       const rest = this.restPosition;
       const restNormal = this.restNormal;
       const plastic = this.plasticOffset;
       const elastic = this.elasticSnapshot;
       const decay = this.elasticDecay;
       const localShellThickness = this.localShellThickness;
+      const fillingInset = this.fillingInset;
       const holeMask = this.holeMask;
+      const holeAffectsGap = this.materialMode !== "waxbbu";
+      const containmentRadiusPerVertex = this.containmentRadiusPerVertex;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const gap = localShellThickness[v] * (1 - holeMask[v]);
-        for (let k = 0; k < 3; k++) {
-          const idx = i3 + k;
-          const corePosition = rest[idx] + plastic[idx] + elastic[idx] * decay;
-          corePos[idx] = corePosition;
-          shellPos[idx] = corePosition + restNormal[idx] * gap;
+        const gap = holeAffectsGap ? localShellThickness[v] * (1 - holeMask[v]) : localShellThickness[v];
+        let cx = rest[i3] + plastic[i3] + elastic[i3] * decay;
+        let cy = rest[i3 + 1] + plastic[i3 + 1] + elastic[i3 + 1] * decay;
+        let cz = rest[i3 + 2] + plastic[i3 + 2] + elastic[i3 + 2] * decay;
+        if (containmentRadiusPerVertex !== null) {
+          const containmentRadius = containmentRadiusPerVertex[v];
+          const distSq = cx * cx + cy * cy + cz * cz;
+          const radiusSq = containmentRadius * containmentRadius;
+          if (distSq > radiusSq) {
+            const s = containmentRadius / Math.sqrt(distSq);
+            cx *= s;
+            cy *= s;
+            cz *= s;
+          }
         }
+        corePos[i3] = cx;
+        corePos[i3 + 1] = cy;
+        corePos[i3 + 2] = cz;
+        shellPos[i3] = cx + restNormal[i3] * gap;
+        shellPos[i3 + 1] = cy + restNormal[i3 + 1] * gap;
+        shellPos[i3 + 2] = cz + restNormal[i3 + 2] * gap;
+        fillingPos[i3] = cx - restNormal[i3] * fillingInset;
+        fillingPos[i3 + 1] = cy - restNormal[i3 + 1] * fillingInset;
+        fillingPos[i3 + 2] = cz - restNormal[i3 + 2] * fillingInset;
       }
       this.coreGeometry.attributes.position.needsUpdate = true;
       this.shellGeometry.attributes.position.needsUpdate = true;
+      this.fillingGeometry.attributes.position.needsUpdate = true;
       this.coreGeometry.computeVertexNormals();
       this.shellGeometry.computeVertexNormals();
+      this.fillingGeometry.computeVertexNormals();
     }
     /**
      * How much of the shell is still visible solid wax, 0-1 — 1 for a
@@ -32304,11 +32504,108 @@ void main() {
      * never quite reaches 0 even though nothing is left on screen. Counting
      * "past the same line the shader itself discards at" instead means this
      * reaches 0% at exactly the moment the last visible scrap disappears.
+     *
+     * Reads the MERGED holeMask (local breaks + global cell reveal — see that
+     * field's own doc comment), so this now correctly reaches 0% once
+     * everything visible is gone even if a lot of it disappeared via the
+     * global reveal rather than a real local break — it used to only track
+     * local breaks, which left this stuck showing wax "remaining" long after
+     * it had visibly all flaked away, and let clicking an already-visually-
+     * empty spot still register as a break (see _checkBreak's holeMask guard).
      */
     getRemainingWaxRatio() {
       let remainingCount = 0;
       for (let v = 0; v < this.vertexCount; v++) {
         if (this.holeMask[v] <= 0.5) remainingCount++;
+      }
+      return remainingCount / this.vertexCount;
+    }
+    /**
+     * Buckets this mesh's own shell into a lat/lon grid (see
+     * containmentBinIndex), each cell holding the CURRENT (this frame's,
+     * already-dented) shortest distance from the origin among every shell
+     * vertex whose LIVE position falls in that cell — used by
+     * composite-waxbbu-mesh.js (via buildContainmentFromGrid below) as a
+     * per-direction containment boundary for the wax inside it. Reads the
+     * LIVE surface, not this.radius (the NOMINAL, undeformed one): while the
+     * bubble is actively dented inward at the press point, its real surface
+     * there sits well inside its own nominal radius.
+     *
+     * Deliberately a GRID over the whole shell, not one single global minimum
+     * — an earlier version returned just the shell's overall closest-to-origin
+     * point and used that ONE number to clamp every core vertex everywhere,
+     * which meant denting the shell at one spot shrank the ENTIRE core, not
+     * just the part near that spot (see containmentRadiusPerVertex's own doc
+     * comment for the exact symptom this caused). Binning by direction instead
+     * means a dent at one spot only lowers the cells that dent's own footprint
+     * actually touches — everywhere else keeps its own, unrelated (much
+     * larger) radius.
+     *
+     * A one-pass min-with-neighbors blur (longitude wraps around, latitude
+     * doesn't) runs afterward for two reasons: it fills in any cell that
+     * happened to land zero shell vertices (the shell's ~2500 vertices spread
+     * unevenly across CONTAINMENT_GRID_LAT_BINS*CONTAINMENT_GRID_LON_BINS
+     * cells, so a few empty ones are expected) by borrowing a neighbor's value
+     * instead of leaving it at Infinity — an empty cell defaulting to
+     * Infinity would be silently too lenient right where a dent's footprint
+     * straddled a cell boundary — and it softens the clamp's own cell-to-cell
+     * edges so the contained wax doesn't visibly facet along the grid itself.
+     */
+    getRadialRadiusGrid() {
+      const pos = this.shellGeometry.attributes.position.array;
+      const cellCount = CONTAINMENT_GRID_LAT_BINS * CONTAINMENT_GRID_LON_BINS;
+      const minDistSq = new Float64Array(cellCount).fill(Infinity);
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const x = pos[i3];
+        const y = pos[i3 + 1];
+        const z = pos[i3 + 2];
+        const distSq = x * x + y * y + z * z;
+        const bin = containmentBinIndex(x, y, z);
+        if (distSq < minDistSq[bin]) minDistSq[bin] = distSq;
+      }
+      const grid = new Float32Array(cellCount);
+      for (let i = 0; i < cellCount; i++) grid[i] = Math.sqrt(minDistSq[i]);
+      const blurred = new Float32Array(cellCount);
+      for (let lat = 0; lat < CONTAINMENT_GRID_LAT_BINS; lat++) {
+        const rowStart = lat * CONTAINMENT_GRID_LON_BINS;
+        for (let lon = 0; lon < CONTAINMENT_GRID_LON_BINS; lon++) {
+          const idx = rowStart + lon;
+          const lonPrev = rowStart + (lon - 1 + CONTAINMENT_GRID_LON_BINS) % CONTAINMENT_GRID_LON_BINS;
+          const lonNext = rowStart + (lon + 1) % CONTAINMENT_GRID_LON_BINS;
+          let m = Math.min(grid[idx], grid[lonPrev], grid[lonNext]);
+          if (lat > 0) m = Math.min(m, grid[idx - CONTAINMENT_GRID_LON_BINS]);
+          if (lat < CONTAINMENT_GRID_LAT_BINS - 1) m = Math.min(m, grid[idx + CONTAINMENT_GRID_LON_BINS]);
+          blurred[idx] = m;
+        }
+      }
+      return blurred;
+    }
+    /**
+     * Turns a SHELL's own getRadialRadiusGrid() into a per-vertex containment
+     * array sized to THIS (the core's) own vertexCount, by binning each of
+     * this mesh's own REST vertex directions — not live/deformed ones, so a
+     * core vertex's clamp target can't drift to some unrelated shell cell
+     * mid-press just because the vertex itself has moved — into that exact
+     * same grid. margin (0..1) shrinks every looked-up value so the wax
+     * settles comfortably inside the shell's own surface rather than exactly
+     * touching it.
+     */
+    buildContainmentFromGrid(grid, margin = 1) {
+      const rest = this.restPosition;
+      const result = new Float32Array(this.vertexCount);
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const bin = containmentBinIndex(rest[i3], rest[i3 + 1], rest[i3 + 2]);
+        result[v] = grid[bin] * margin;
+      }
+      return result;
+    }
+    /** LOCAL-only remaining ratio — counts only real, click-driven breaks (_localHoleMask), blind to the global reveal. Exists purely to safely DRIVE globalRevealProgress in _applyGlobalReveal without creating a feedback loop with getRemainingWaxRatio's own (merged) result. */
+    getLocalRemainingRatio() {
+      let remainingCount = 0;
+      for (let v = 0; v < this.vertexCount; v++) {
+        if (this._localHoleMask[v] <= 0.5) remainingCount++;
       }
       return remainingCount / this.vertexCount;
     }
@@ -32320,14 +32617,120 @@ void main() {
       this._elasticHeld = false;
       this.crackDamage.fill(0);
       this.holeMask.fill(0);
+      this._localHoleMask.fill(0);
+      this.globalRevealProgress = 0;
       this.hasBrokenOnce = false;
       this._rebuildPositions();
       this.shellGeometry.attributes.crackDamage.needsUpdate = true;
       this.shellGeometry.attributes.holeMask.needsUpdate = true;
+      this.coreGeometry.attributes.crackDamage.needsUpdate = true;
+      this.coreGeometry.attributes.holeMask.needsUpdate = true;
     }
     dispose() {
       this.coreGeometry.dispose();
       this.shellGeometry.dispose();
+      this.fillingGeometry.dispose();
+    }
+  };
+
+  // src/composite-waxbbu-mesh.js
+  var CONTAINMENT_MARGIN = 0.82;
+  var CompositeWaxbbuMesh = class {
+    constructor(shellDeform, coreDeform) {
+      this.shellDeform = shellDeform;
+      this.coreDeform = coreDeform;
+      this.coreDeform.containmentRadiusPerVertex = coreDeform.buildContainmentFromGrid(
+        shellDeform.getRadialRadiusGrid(),
+        CONTAINMENT_MARGIN
+      );
+      this.mesh = shellDeform.mesh;
+      this.coreMesh = coreDeform.coreMesh;
+      this.fillingMesh = coreDeform.fillingMesh;
+      this.radius = shellDeform.radius;
+      this.localDepth = shellDeform.localDepth;
+      this.imageFrameHalfExtent = coreDeform.imageFrameHalfExtent;
+      this._lastShellPoint = null;
+      this._cachedCorePoint = null;
+      this._cachedCoreNormal = null;
+      this.setMaterialMode();
+    }
+    /** Real breaking only ever happens on the wax (core), never the plain rubber bubble — see class doc comment. */
+    get hasBrokenOnce() {
+      return this.coreDeform.hasBrokenOnce;
+    }
+    /** See setCellReveal's own doc comment on why this must be THE single shared source of truth for the shader uniform of the same name — reads from coreDeform, same reasoning. */
+    get globalRevealProgress() {
+      return this.coreDeform.globalRevealProgress;
+    }
+    /**
+     * A composite only ever exists for "왁뿌볼" (see buildDeformable in
+     * main.js) — the bubble always springs back elastic like any other 왁뿌볼
+     * shell, but the wax inside is deliberately CLAY-like (plastic, permanent
+     * — "속에 있는 왁스와 속재질은 클레이처럼 누르면 모양이 뭉개지면 좋겠어")
+     * instead of 왁뿌볼's usual elastic wax, REGARDLESS of whatever mode
+     * string this happens to be called with — main.js's general "재질 전환"
+     * plumbing calls setMaterialMode(mode) with the UI's raw selection, but a
+     * composite's own two halves never both want that same raw value.
+     */
+    setMaterialMode() {
+      this.shellDeform.setMaterialMode("waxbbu");
+      this.coreDeform.setMaterialMode("clay");
+    }
+    /** Only ever called once per press (see pointer-interaction.js's _onDown) — against the OUTER bubble, matching this.radius/localDepth above. */
+    surfacePointTowards(direction) {
+      return this.shellDeform.surfacePointTowards(direction);
+    }
+    /**
+     * point/normal are the BUBBLE's own surface point (from surfacePointTowards
+     * above) — poke the bubble with them directly, then separately look up
+     * (and cache — see the constructor) the wax's OWN corresponding point in
+     * roughly the same direction, and poke that too. Both dent/crack
+     * completely independently from here on; only the driving click point is
+     * shared. Returns the WAX's own fragmentSpawn descriptor (sound/first-break
+     * signal) — the bubble's own is intentionally discarded, since it never
+     * shows a dramatic break at all (see class doc comment).
+     */
+    poke(point, normal, delta, holdSeconds) {
+      this.shellDeform.poke(point, normal, delta, holdSeconds);
+      if (point !== this._lastShellPoint) {
+        const { point: corePoint, normal: coreNormal } = this.coreDeform.surfacePointTowards(point);
+        this._lastShellPoint = point;
+        this._cachedCorePoint = corePoint;
+        this._cachedCoreNormal = coreNormal;
+      }
+      return this.coreDeform.poke(this._cachedCorePoint, this._cachedCoreNormal, delta, holdSeconds);
+    }
+    /**
+     * Both independently advance their own spring-back/GPU upload — a visual
+     * change in EITHER one still means the frame needs rendering. Recomputes
+     * the core's per-vertex containment grid from the shell's freshly-updated
+     * LIVE surface first (see getRadialRadiusGrid's own doc comment) — must
+     * happen between the two update() calls, not before both or after both, so
+     * this frame's core position rebuild (inside coreDeform.update, right
+     * below) already clamps against however dented the bubble actually is
+     * RIGHT NOW, in every direction independently.
+     */
+    update(dt) {
+      const shellChanged = this.shellDeform.update(dt);
+      this.coreDeform.containmentRadiusPerVertex = this.coreDeform.buildContainmentFromGrid(
+        this.shellDeform.getRadialRadiusGrid(),
+        CONTAINMENT_MARGIN
+      );
+      const coreChanged = this.coreDeform.update(dt);
+      return shellChanged || coreChanged;
+    }
+    /** The wax's own — the bubble never tracks/shows any breaking (see class doc comment). */
+    getRemainingWaxRatio() {
+      return this.coreDeform.getRemainingWaxRatio();
+    }
+    reset() {
+      this._lastShellPoint = null;
+      this.shellDeform.reset();
+      this.coreDeform.reset();
+    }
+    dispose() {
+      this.shellDeform.dispose();
+      this.coreDeform.dispose();
     }
   };
 
@@ -32441,6 +32844,17 @@ uniform sampler2D coreMap;
 uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette \u2014 see wax-material.js's setProjectionScale
 uniform float hazeAmount;
 uniform float sparkleAmount;
+// 0 only for "\uC641\uBFCC\uBCFC"'s outer shell (see wax-material.js's SHELL_LOOK.waxbbuShell)
+// \u2014 turns off every crack-line/hole effect below so this skin stays a plain,
+// always-intact dome no matter how much crackDamage/holeMask have actually
+// risen underneath (that's now rendered on the CORE instead \u2014 see
+// CORE_FRAGMENT_COLOR). 1 everywhere else leaves this file's behavior unchanged.
+uniform float crackVisible;
+// 0..1, tracking OVERALL remaining wax (main.js), not this vertex's own
+// click damage \u2014 clay/slime only (crackVisible gates it off for waxbbuShell
+// too, same as the rest of this file) \u2014 see SHELL_FRAGMENT_COLOR's own doc
+// comment further down.
+uniform float shellCellRevealProgress;
 ${NOISE}
 `;
   var SHELL_FRAGMENT_COLOR = `#include <color_fragment>
@@ -32449,7 +32863,7 @@ float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
 
 float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
 float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
-float crack = crackLine * crackSpread * (1.0 - vHoleMask);
+float crack = crackLine * crackSpread * (1.0 - vHoleMask) * crackVisible;
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
 vec4 hazeSample = texture2D(coreMap, hazeUv);
@@ -32497,9 +32911,29 @@ diffuseColor.rgb = mix(diffuseColor.rgb, glintHue, sparkleGlint * 0.55);
 // flat lighting, not just wherever a light happens to catch a bump.
 diffuseColor.rgb *= mix(1.0, 0.92 + 0.16 * grainHeight, sparkleAmount);
 
-diffuseColor.a = 1.0 - crack * 0.9;
+// Multiplied by the material's own opacity uniform (already in scope from
+// the standard common/color_fragment chunks re-included above) \u2014 without
+// this, a real material.opacity below 1 (see wax-material.js's waxbbuShell,
+// which needs a genuinely translucent skin) was silently ignored everywhere
+// except right at a crack line, since this line used to just overwrite
+// diffuseColor.a outright.
+diffuseColor.a = (1.0 - crack * 0.9) * opacity;
 
-if (vHoleMask > 0.5) discard;
+// \uD074\uB808\uC774/\uC2AC\uB77C\uC784 only (crackVisible is 0 for waxbbuShell, making this a no-op
+// there \u2014 that shell never shows any of this, by design). Reuses the SAME
+// Voronoi cell partition the crack lines above already draw (same
+// crackCellFrequency) \u2014 hashes each cell's own identity to a fixed threshold
+// in 0..1, and discards that WHOLE cell (revealing the \u2014 already opaque \u2014
+// core straight through, exactly like a real local break already does)
+// once OVERALL remaining wax crosses it, regardless of whether THIS spot
+// was ever actually clicked. Higher overall damage -> more scattered cells
+// across the WHOLE shell have crossed their own threshold, reading as wax
+// visibly flaking away everywhere, not just where you're pressing.
+vec4 shellCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
+float shellCellThreshold = waxHash3(shellCell.xyz).y;
+bool shellCellRevealed = shellCellThreshold < shellCellRevealProgress && crackVisible > 0.5;
+
+if ((vHoleMask > 0.5 && crackVisible > 0.5) || shellCellRevealed) discard;
 `;
   var SHELL_FRAGMENT_ROUGHNESS = `#include <roughnessmap_fragment>
 roughnessFactor = mix(waxRoughnessBase, waxRoughnessBase * 1.3, crack);
@@ -32519,14 +32953,35 @@ if (sparkleAmount > 0.0) {
 `;
   var CORE_VERTEX_COMMON = `#include <common>
 varying vec3 vObjectPosition;
+// Shares the SAME per-vertex data the shell's own crack lines read (see
+// SHELL_VERTEX_COMMON) \u2014 added to the core geometry too (deformable-mesh.js)
+// purely so "\uC641\uBFCC\uBCFC" mode can grow its OWN crack-line/hole network here (see
+// CORE_FRAGMENT_COLOR); a no-op varying for clay/slime, where
+// innerCrackVisible stays 0.
+attribute float crackDamage;
+attribute float holeMask;
+varying float vCrackDamage;
+varying float vHoleMask;
 `;
   var CORE_VERTEX_BEGIN = `#include <begin_vertex>
 vObjectPosition = transformed;
+vCrackDamage = crackDamage;
+vHoleMask = holeMask;
 `;
   var CORE_FRAGMENT_COMMON = `#include <common>
 varying vec3 vObjectPosition;
+varying float vCrackDamage;
+varying float vHoleMask;
 uniform sampler2D coreMap;
 uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette \u2014 see wax-material.js's setProjectionScale
+// Only nonzero for "\uC641\uBFCC\uBCFC" \u2014 see this block's own doc comment below.
+uniform float innerCrackVisible;
+uniform float crackCellFrequency;
+// 0..1, tracking OVERALL remaining wax (main.js), not this vertex's own
+// damage \u2014 see CORE_FRAGMENT_COLOR's own doc comment on cellRevealProgress.
+uniform float cellRevealProgress;
+uniform vec3 cellRevealColor;
+${NOISE}
 `;
   var CORE_FRAGMENT_COLOR = `#include <color_fragment>
 vec2 coreUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
@@ -32534,7 +32989,52 @@ vec4 coreSample = texture2D(coreMap, coreUv);
 // Same reasoning as the shell's hazeColor above: blend toward the app's own
 // neutral "no photo" gray wherever the source is transparent, instead of
 // showing whatever rgb happens to be stored under a transparent pixel.
-diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
+// A transparent PNG's edge/border pixels (alpha=0) also get sampled at any
+// side-facing geometry (e.g. a custom shape's beveled rim) that the
+// front-projection UV can't meaningfully cover at all \u2014 that fallback used
+// to be a flat neutral grey (0.706 all channels), which read as a jarring,
+// clearly-different patch there rather than a believable continuation of
+// the wax. Warmed toward a pale cream tone instead \u2014 still not the actual
+// photo (a real fix would need the projection to wrap side-facing geometry,
+// out of scope here), but far less visually jarring.
+vec3 photoColor = mix(vec3(0.85, 0.79, 0.68), coreSample.rgb, coreSample.a);
+
+// "\uC641\uBFCC\uBCFC" only (innerCrackVisible is 0 everywhere else, making all of this a
+// no-op and leaving photoColor as the final result exactly as before): the
+// wax keeps the user's own photo/color \u2014 it grows the same style of Voronoi
+// crack-line network the shell normally shows (see SHELL_FRAGMENT_COLOR),
+// darkening that same color rather than alpha-gapping it, since there's
+// nothing further inside to reveal through a growing crack (yet \u2014 see
+// discard below). Once damage actually crosses the break threshold at a
+// vertex (holeMask \u2014 same shared field and same 0.5 cutoff the shell used
+// to discard at), this DOES discard for real: that's a genuine hole, not a
+// tint, revealing DeformableMesh's fillingMesh (a plain white solid layer
+// just inside the core) rather than empty space.
+vec2 innerVoronoi = waxVoronoi(vObjectPosition * crackCellFrequency);
+float innerCrackLine = 1.0 - smoothstep(0.0, 0.09, innerVoronoi.y - innerVoronoi.x);
+float innerCrackSpread = smoothstep(0.0, 0.3, vCrackDamage);
+float innerCrack = innerCrackLine * innerCrackSpread * (1.0 - vHoleMask) * innerCrackVisible;
+
+vec3 baseWax = mix(photoColor, photoColor * 0.7, innerCrack);
+
+// "\uC641\uBFCC\uBCFC" only, and GLOBAL rather than local (cellRevealProgress tracks
+// overall remaining wax, not this vertex's own click damage) \u2014 "\uC641\uC2A4\uAC00 \uC810\uC810
+// \uD22C\uBA85\uD574\uC9C0\uB294 \uAC8C \uC544\uB2C8\uB77C (\uC2E4\uC81C \uC571\uCC98\uB7FC) \uC870\uAC01\uC774 \uD1B5\uC9F8\uB85C \uC0AC\uB77C\uC9C0\uB294" way: reuses the
+// SAME Voronoi cell partition the crack lines already draw (same
+// crackCellFrequency), hashes each cell's own identity to a fixed, evenly-
+// spread threshold in 0..1, and swaps that WHOLE cell over to
+// cellRevealColor (the filling's own current color, kept in sync from
+// main.js \u2014 see wax-material.js's setCellReveal) the moment overall
+// progress crosses it. Higher overall progress -> more cells (a growing,
+// randomly-scattered fraction of them) have crossed their own threshold,
+// so what's left reads as fewer, smaller surviving islands of wax \u2014 not a
+// uniform color fade.
+vec4 innerCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
+float cellThreshold = waxHash3(innerCell.xyz).y;
+float cellRevealed = step(cellThreshold, cellRevealProgress) * innerCrackVisible;
+diffuseColor.rgb = mix(baseWax, cellRevealColor, cellRevealed);
+
+if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
 `;
 
   // src/wax-material.js
@@ -32552,7 +33052,14 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       coreMap: { value: makeDefaultCoreTexture() },
       projectionScale: { value: new Vector2(1, 1) },
       hazeAmount: { value: 0.45 },
-      sparkleAmount: { value: 0 }
+      sparkleAmount: { value: 0 },
+      // Only 0 for waxbbuShell (see SHELL_LOOK) — turns off this material's own
+      // crack-line/hole rendering so "왁뿌볼"'s outer skin never shows either,
+      // regardless of the real (shared) crackDamage/holeMask values rising
+      // underneath as the core actually breaks.
+      crackVisible: { value: 1 },
+      // Clay/slime only — see setShellCellReveal below.
+      shellCellRevealProgress: { value: 0 }
     };
     const material = new MeshPhysicalMaterial({
       color: 16777215,
@@ -32578,7 +33085,24 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
   function createCoreMaterial() {
     const uniforms = {
       coreMap: { value: makeDefaultCoreTexture() },
-      projectionScale: { value: new Vector2(1, 1) }
+      projectionScale: { value: new Vector2(1, 1) },
+      // Only nonzero for "왁뿌볼" (see CORE_LOOK.waxbbu below): grows the SAME
+      // kind of crack-line/hole network the shell normally shows (see
+      // shaders/wax-crack-chunks.js) darkening the user's own photo/color —
+      // for this mode ONLY, that visual moves down onto the core (what's
+      // really "the wax", still the user's own chosen color/photo, same as
+      // clay/slime), while the shell above it stays a plain, always-intact
+      // translucent dome (see SHELL_LOOK.waxbbuShell's own crackVisible gate)
+      // — so what visibly cracks and opens up is "the wax inside", seen
+      // through the shell's translucency, never the shell itself. Once a
+      // hole actually opens, DeformableMesh's fillingMesh (a plain, always-
+      // opaque white layer just inside the core) shows through it instead of
+      // empty space. 0 for clay/slime leaves all of this a no-op.
+      innerCrackVisible: { value: 0 },
+      crackCellFrequency: { value: 3.2 },
+      // "왁뿌볼" only — see setCellReveal below.
+      cellRevealProgress: { value: 0 },
+      cellRevealColor: { value: new Color(FILLING_BASE_COLOR) }
     };
     const material = new MeshPhysicalMaterial({
       color: 16777215,
@@ -32596,9 +33120,43 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     material.userData.waxUniforms = uniforms;
     return material;
   }
+  var FILLING_BASE_COLOR = 16117990;
+  function createFillingMaterial() {
+    return new MeshPhysicalMaterial({
+      color: FILLING_BASE_COLOR,
+      roughness: 0.5,
+      metalness: 0,
+      clearcoat: 0.1,
+      clearcoatRoughness: 0.5,
+      side: FrontSide
+    });
+  }
+  var fillingBaseColorObj = new Color(FILLING_BASE_COLOR);
+  var fillingMixScratch = new Color();
+  var FILLING_MIX_TARGET_LIGHTEN = 0.45;
+  function setFillingMix(fillingMaterial2, waxColorHex, mixAmount) {
+    fillingMixScratch.set(waxColorHex).lerp(fillingBaseColorObj, FILLING_MIX_TARGET_LIGHTEN);
+    fillingMaterial2.color.copy(fillingBaseColorObj).lerp(fillingMixScratch, mixAmount);
+  }
+  function setCellReveal(coreMaterial2, fillingMaterial2, globalRevealProgress) {
+    const uniforms = coreMaterial2.userData.waxUniforms;
+    uniforms.cellRevealProgress.value = globalRevealProgress;
+    uniforms.cellRevealColor.value.copy(fillingMaterial2.color);
+  }
   var CORE_LOOK = {
-    clay: { transparent: false, opacity: 1, roughness: 0.55, clearcoat: 0.15, clearcoatRoughness: 0.5 },
-    slime: { transparent: false, opacity: 1, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.25 }
+    clay: { transparent: false, opacity: 1, roughness: 0.55, clearcoat: 0.15, clearcoatRoughness: 0.5, innerCrackVisible: 0 },
+    slime: { transparent: false, opacity: 1, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.25, innerCrackVisible: 0 },
+    // "왁뿌볼": the wax that actually cracks/breaks — see innerCrackVisible's
+    // own comment above createCoreMaterial. Stays fully opaque (transparent:
+    // false) even though it now also uses `discard`: discard works regardless
+    // of the transparent flag (it's a fragment-shader instruction, not alpha
+    // blending). side: FrontSide (not the usual DoubleSide) for the same
+    // reason the shell needed it for waxbbuShell — with DoubleSide, a
+    // discarded front-facing pixel on this closed shape just reveals its own
+    // back-inside surface at that same screen spot instead of a real gap,
+    // hiding every hole/crack completely (confirmed directly: with DoubleSide
+    // here, a fully cracked wax rendered as a plain, unbroken dent).
+    waxbbu: { transparent: false, opacity: 1, roughness: 0.4, clearcoat: 0.3, clearcoatRoughness: 0.35, innerCrackVisible: 1, side: FrontSide }
   };
   var SHELL_LOOK = {
     basic: {
@@ -32630,6 +33188,71 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       clearcoat: 0.1,
       clearcoatRoughness: 0.6,
       sparkleAmount: 1
+    },
+    // Same opaque-coating structure as "chocolate" (hazeAmount 0 — what's
+    // inside only shows once it actually breaks off), just a different
+    // color/gloss: butter reads glossy like chocolate, milk reads matte
+    // (low clearcoat, higher roughness) instead.
+    butter: {
+      waxColor: 15983264,
+      hazeAmount: 0,
+      waxRoughnessBase: 0.3,
+      clearcoat: 0.6,
+      clearcoatRoughness: 0.15,
+      sparkleAmount: 0
+    },
+    milk: {
+      waxColor: 16249315,
+      hazeAmount: 0,
+      waxRoughnessBase: 0.75,
+      clearcoat: 0.1,
+      clearcoatRoughness: 0.6,
+      sparkleAmount: 0
+    },
+    // Same translucent structure as "basic" (haze lets a hint of the core
+    // through) — just a different tint.
+    strawberry: {
+      waxColor: 16103626,
+      hazeAmount: 0.45,
+      waxRoughnessBase: 0.38,
+      clearcoat: 0.35,
+      clearcoatRoughness: 0.4,
+      sparkleAmount: 0
+    },
+    grape: {
+      waxColor: 13032303,
+      hazeAmount: 0.45,
+      waxRoughnessBase: 0.38,
+      clearcoat: 0.35,
+      clearcoatRoughness: 0.4,
+      sparkleAmount: 0
+    },
+    // The "왁뿌볼" mode's own outer skin look — not selectable from the wax-type
+    // row (that row is hidden entirely while this mode is active, see main.js),
+    // just applied directly whenever materialMode becomes 'waxbbu'. Fixed
+    // ivory, no haze (hazeAmount 0 — the photo/color never reaches this look at
+    // all, unlike every other entry above) and crackVisible: 0 turns off the
+    // shell's own crack-line/hole rendering entirely (see SHELL_FRAGMENT_COLOR)
+    // — this skin never shows a crack itself. What the player actually sees
+    // breaking is the CORE underneath (CORE_LOOK.waxbbu), made visible through
+    // this shell's real alpha transparency (opacity below), not a haze blend.
+    waxbbuShell: {
+      waxColor: 16249574,
+      hazeAmount: 0,
+      waxRoughnessBase: 0.35,
+      clearcoat: 0.5,
+      clearcoatRoughness: 0.25,
+      sparkleAmount: 0,
+      crackVisible: 0,
+      opacity: 0.45
+      // Stays the usual DoubleSide (see this file's top comment) — FrontSide
+      // was tried here to avoid a theoretical far/near-face blending glitch,
+      // but on a custom (photo-silhouette) shape's beveled side wall it
+      // reliably backface-culled the shell's own geometry there (a real,
+      // confirmed winding quirk of this project's generated shapes — see the
+      // same top comment), letting the raw opaque core show through as a
+      // solid white band instead of a translucent one. DoubleSide costs
+      // nothing for a shell this thin and fixes that outright.
     }
   };
   function setCoreMaterialMode(coreMaterial2, mode) {
@@ -32639,6 +33262,8 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     coreMaterial2.roughness = look.roughness;
     coreMaterial2.clearcoat = look.clearcoat;
     coreMaterial2.clearcoatRoughness = look.clearcoatRoughness;
+    coreMaterial2.userData.waxUniforms.innerCrackVisible.value = look.innerCrackVisible ?? 0;
+    coreMaterial2.side = look.side ?? DoubleSide;
   }
   function setShellLook(shellMaterial2, waxType) {
     const look = SHELL_LOOK[waxType] ?? SHELL_LOOK.basic;
@@ -32647,8 +33272,14 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     uniforms.hazeAmount.value = look.hazeAmount;
     uniforms.waxRoughnessBase.value = look.waxRoughnessBase;
     uniforms.sparkleAmount.value = look.sparkleAmount;
+    uniforms.crackVisible.value = look.crackVisible ?? 1;
     shellMaterial2.clearcoat = look.clearcoat;
     shellMaterial2.clearcoatRoughness = look.clearcoatRoughness;
+    shellMaterial2.opacity = look.opacity ?? 1;
+    shellMaterial2.side = look.side ?? DoubleSide;
+  }
+  function setShellCellReveal(shellMaterial2, globalRevealProgress) {
+    shellMaterial2.userData.waxUniforms.shellCellRevealProgress.value = globalRevealProgress;
   }
   function setCoreTexture(coreMaterial2, shellMaterial2, texture) {
     const old = coreMaterial2.userData.waxUniforms.coreMap.value;
@@ -32963,6 +33594,26 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       ]
     }
   };
+  WAX_TYPE_SOUND.butter = WAX_TYPE_SOUND.chocolate;
+  WAX_TYPE_SOUND.milk = WAX_TYPE_SOUND.chocolate;
+  var WAXBBU_CRACK_POOL_ABOVE_40 = [
+    "sounds/freesound_community-cracking-66624_[cut_1sec].mp3",
+    "sounds/freesound_community-cracking-66624_[cut_1sec] (1).mp3",
+    "sounds/freesound_community-cracking-66624_[cut_1sec] (2).mp3",
+    "sounds/freesound_community-cracking-66624_[cut_1sec] (3).mp3",
+    "sounds/freesound_community-cracking-66624_[cut_1sec] (4).mp3",
+    "sounds/freesound_community-cracking-66624_[cut_1sec] (5).mp3",
+    "sounds/freesound_community-cracking-66624_[cut_1sec] (6).mp3"
+  ];
+  var WAXBBU_CRACK_POOL_AT_OR_BELOW_40 = [
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_0sec].mp3",
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (1).mp3",
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (2).mp3",
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (3).mp3",
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (4).mp3",
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (5).mp3",
+    "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec].mp3"
+  ];
   var FIRST_ATTEMPT_CRACK_SOUND = "sounds/freesound_community-bamboocracking-78192_[cut_1sec].mp3";
   var templates = {};
   var masterVolume = 1;
@@ -32998,6 +33649,16 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       playOne(src, strength);
     }
   }
+  function playWaxbbuSound(tier, strength = 1) {
+    if (masterVolume <= 0) return;
+    if (tier === "first") {
+      playOne(SLIME_FIRST_BREAK_SOUND, strength);
+      return;
+    }
+    playOne(SLIME_SOUND_POOL[Math.floor(Math.random() * SLIME_SOUND_POOL.length)], strength);
+    const crackPool = tier === "low" ? WAXBBU_CRACK_POOL_AT_OR_BELOW_40 : WAXBBU_CRACK_POOL_ABOVE_40;
+    playOne(crackPool[Math.floor(Math.random() * crackPool.length)], strength);
+  }
 
   // src/ui.js
   function wireButtonGroup(groupName, onSelect) {
@@ -33021,7 +33682,11 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     onThemeChange
   }) {
     wireButtonGroup("waxType", onWaxTypeChange);
-    wireButtonGroup("material", onMaterialChange);
+    const waxTypeSection = document.getElementById("wax-type-section");
+    wireButtonGroup("material", (mode) => {
+      waxTypeSection.style.display = mode === "waxbbu" ? "none" : "";
+      onMaterialChange(mode);
+    });
     wireButtonGroup("theme", (theme) => {
       document.documentElement.dataset.theme = theme;
       onThemeChange?.(theme);
@@ -33071,6 +33736,13 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       uiToggle.textContent = collapsed ? "\u2630" : "\u2715";
     });
     document.getElementById("completion-close").addEventListener("click", hideCompletionBanner);
+    const helpPanel = document.getElementById("help-panel");
+    document.getElementById("help-button").addEventListener("click", () => {
+      helpPanel.classList.add("visible");
+    });
+    document.getElementById("help-close").addEventListener("click", () => {
+      helpPanel.classList.remove("visible");
+    });
     return { initialColor: colorPicker.value };
   }
   var TOAST_DURATION_MS = 2600;
@@ -33132,10 +33804,25 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
   var baseFov = camera.fov;
   var coreMaterial = createCoreMaterial();
   var shellMaterial = createShellMaterial();
+  var fillingMaterial = createFillingMaterial();
   var fragments = new FragmentSystem(scene, groundY);
   var currentMaterialMode = "clay";
   var currentWaxType = "basic";
+  var currentColorHex;
+  var usingPhotoTexture = false;
   var isCustomShape = false;
+  var currentSilhouette = null;
+  var WAXBBU_BUBBLE_RADIUS_SCALE = 1.15;
+  function buildDeformable(geometry, isCustom) {
+    if (currentMaterialMode === "waxbbu" && isCustom) {
+      const shellDeform = new DeformableMesh(buildSphereGeometry(WAXBBU_BUBBLE_RADIUS_SCALE), coreMaterial, shellMaterial, fillingMaterial);
+      const coreDeform = new DeformableMesh(geometry, coreMaterial, shellMaterial, fillingMaterial);
+      return new CompositeWaxbbuMesh(shellDeform, coreDeform);
+    }
+    const deform = new DeformableMesh(geometry, coreMaterial, shellMaterial, fillingMaterial);
+    deform.setMaterialMode(currentMaterialMode);
+    return deform;
+  }
   var waxStartTime = null;
   var clickCount = 0;
   var completionShown = false;
@@ -33145,22 +33832,26 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     completionShown = false;
     updateWaxProgress(1);
     hideCompletionBanner();
+    setFillingMix(fillingMaterial, currentColorHex, 0);
+    setCellReveal(coreMaterial, fillingMaterial, deformable.globalRevealProgress);
+    setShellCellReveal(shellMaterial, deformable.globalRevealProgress);
   }
-  var deformable = new DeformableMesh(buildSphereGeometry(), coreMaterial, shellMaterial);
-  deformable.setMaterialMode(currentMaterialMode);
+  var deformable = buildDeformable(buildSphereGeometry(), false);
   setCoreMaterialMode(coreMaterial, currentMaterialMode);
   setShellLook(shellMaterial, "basic");
   setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
   scene.add(deformable.coreMesh);
   scene.add(deformable.mesh);
-  function rebuildShape(geometry) {
+  scene.add(deformable.fillingMesh);
+  function rebuildShape(geometry, isCustom) {
     scene.remove(deformable.coreMesh);
     scene.remove(deformable.mesh);
+    scene.remove(deformable.fillingMesh);
     deformable.dispose();
-    deformable = new DeformableMesh(geometry, coreMaterial, shellMaterial);
-    deformable.setMaterialMode(currentMaterialMode);
+    deformable = buildDeformable(geometry, isCustom);
     scene.add(deformable.coreMesh);
     scene.add(deformable.mesh);
+    scene.add(deformable.fillingMesh);
     setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
     startNewWaxTracking();
   }
@@ -33168,12 +33859,25 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
   var SHORT_TAP_HINT_THRESHOLD = 3;
   var shortTapCount = 0;
   var COMPLETION_REMAINING_THRESHOLD = 0.1;
+  var WAXBBU_LOW_SOUND_THRESHOLD = 0.4;
   var pointerInteraction = new PointerInteraction({
     renderer,
     camera,
     getActiveMesh: () => deformable,
-    onPoke: (strength, isFirstBreak = false) => playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak),
+    // "왁뿌볼" has its own three-tier sound system entirely separate from the
+    // clay/slime pool-based one — see audio.js's playWaxbbuSound. isFirstBreak
+    // always means 'first' (that dramatic first break can only ever happen
+    // once); otherwise the tier just tracks how much wax is left right now.
+    onPoke: (strength, isFirstBreak = false) => {
+      if (currentMaterialMode === "waxbbu") {
+        const tier = isFirstBreak ? "first" : deformable.getRemainingWaxRatio() <= WAXBBU_LOW_SOUND_THRESHOLD ? "low" : "mid";
+        playWaxbbuSound(tier, strength);
+        return;
+      }
+      playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak);
+    },
     onFragmentPop: (point, normal, radius) => {
+      if (currentMaterialMode === "waxbbu") return;
       fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
     },
     // x is only ever passed as null to mean "hide/reset" (release, drag, or the
@@ -33215,30 +33919,48 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       requestRender();
     },
     onMaterialChange: (mode) => {
+      const modeChanged = mode !== currentMaterialMode;
       currentMaterialMode = mode;
-      deformable.setMaterialMode(mode);
       setCoreMaterialMode(coreMaterial, mode);
+      setShellLook(shellMaterial, mode === "waxbbu" ? "waxbbuShell" : currentWaxType);
+      if (modeChanged && isCustomShape) {
+        rebuildShape(buildImageGeometry(currentSilhouette), true);
+      } else {
+        deformable.setMaterialMode(mode);
+        if (modeChanged) {
+          deformable.reset();
+          fragments.reset();
+          shortTapCount = 0;
+          startNewWaxTracking();
+        }
+      }
       requestRender();
     },
     onColorChange: (hex) => {
+      currentColorHex = hex;
+      usingPhotoTexture = false;
       setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
       requestRender();
     },
     onPhotoChange: async (file) => {
       const { texture, silhouette } = await loadPhotoTexture(file);
+      usingPhotoTexture = true;
       setCoreTexture(coreMaterial, shellMaterial, texture);
       if (silhouette) {
-        rebuildShape(buildImageGeometry(silhouette));
+        currentSilhouette = silhouette;
+        rebuildShape(buildImageGeometry(silhouette), true);
         isCustomShape = true;
       } else if (isCustomShape) {
-        rebuildShape(buildSphereGeometry());
+        currentSilhouette = null;
+        rebuildShape(buildSphereGeometry(), false);
         isCustomShape = false;
       }
       requestRender();
     },
     onPhotoRemove: () => {
       if (isCustomShape) {
-        rebuildShape(buildSphereGeometry());
+        currentSilhouette = null;
+        rebuildShape(buildSphereGeometry(), false);
         isCustomShape = false;
         requestRender();
       }
@@ -33256,6 +33978,7 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
       requestRender();
     }
   });
+  currentColorHex = initialColor;
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
   var lastTime = performance.now();
   var animationFrameId = null;
@@ -33268,6 +33991,12 @@ diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
     if (meshChanged) {
       const remainingRatio = deformable.getRemainingWaxRatio();
       updateWaxProgress(remainingRatio);
+      if (currentMaterialMode === "waxbbu") {
+        setFillingMix(fillingMaterial, currentColorHex, usingPhotoTexture ? 0 : 1 - remainingRatio);
+        setCellReveal(coreMaterial, fillingMaterial, deformable.globalRevealProgress);
+      } else {
+        setShellCellReveal(shellMaterial, deformable.globalRevealProgress);
+      }
       if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {
         completionShown = true;
         showCompletionBanner((now - waxStartTime) / 1e3, clickCount);

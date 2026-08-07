@@ -20,7 +20,14 @@ export function initUI({
   onThemeChange,
 }) {
   wireButtonGroup('waxType', onWaxTypeChange);
-  wireButtonGroup('material', onMaterialChange);
+  const waxTypeSection = document.getElementById('wax-type-section');
+  wireButtonGroup('material', (mode) => {
+    // "왁뿌볼" has its own fixed shell look (see main.js/wax-material.js) and
+    // ignores the wax-type selection entirely, so the row that picks it is
+    // hidden rather than left showing options that do nothing.
+    waxTypeSection.style.display = mode === 'waxbbu' ? 'none' : '';
+    onMaterialChange(mode);
+  });
   // The theme itself is CSS-only (a data-theme attribute the stylesheet's
   // :root[data-theme="light"] override reacts to) — onThemeChange only
   // exists so main.js can also re-color the 3D canvas background/ground
@@ -94,6 +101,17 @@ export function initUI({
   // hideCompletionBanner's own comment for why the banner no longer reacts
   // to taps anywhere on it or fades out on a timer.
   document.getElementById('completion-close').addEventListener('click', hideCompletionBanner);
+
+  // The how-to-play text used to sit permanently at the bottom of the menu —
+  // moved behind this on-demand "?" button instead so the menu itself stays
+  // short. Same open-via-button/close-via-X pattern as the completion banner.
+  const helpPanel = document.getElementById('help-panel');
+  document.getElementById('help-button').addEventListener('click', () => {
+    helpPanel.classList.add('visible');
+  });
+  document.getElementById('help-close').addEventListener('click', () => {
+    helpPanel.classList.remove('visible');
+  });
 
   return { initialColor: colorPicker.value };
 }

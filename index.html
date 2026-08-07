@@ -26,24 +26,32 @@
     <div id="ui">
     <div class="ui-header">
       <h1>왁스 뿌수기</h1>
+      <button type="button" id="help-button" aria-label="설명 보기">?</button>
       <button type="button" id="ui-toggle" aria-label="메뉴 열기/닫기">✕</button>
     </div>
 
     <div id="ui-body">
       <section>
+        <h2>종류</h2>
+        <div class="button-row" data-group="material">
+          <button type="button" data-value="clay" class="active">클레이</button>
+          <button type="button" data-value="slime">슬라임</button>
+          <button type="button" data-value="waxbbu">왁뿌볼</button>
+        </div>
+      </section>
+
+      <section id="wax-type-section">
         <h2>왁스 종류</h2>
         <div class="button-row" data-group="waxType">
           <button type="button" data-value="basic" class="active">기본</button>
           <button type="button" data-value="chocolate">초콜릿</button>
           <button type="button" data-value="sand">모래</button>
         </div>
-      </section>
-
-      <section>
-        <h2>재질</h2>
-        <div class="button-row" data-group="material">
-          <button type="button" data-value="clay" class="active">클레이</button>
-          <button type="button" data-value="slime">슬라임</button>
+        <div class="button-row" data-group="waxType">
+          <button type="button" data-value="butter">버터</button>
+          <button type="button" data-value="strawberry">딸기</button>
+          <button type="button" data-value="grape">청포도</button>
+          <button type="button" data-value="milk">밀크</button>
         </div>
       </section>
 
@@ -76,10 +84,13 @@
       <section>
         <button type="button" id="reset-button" class="reset">새 왁스로 리셋</button>
       </section>
+    </div>
+    </div>
+  </div>
 
-      <p class="hint">클릭한 순간부터 눌리고, 오래 누를수록 세게 눌려요. 새 왁스는 1.5초 이상 눌러야 처음 크게 갈라져요. 그 뒤로는 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요.</p>
-    </div>
-    </div>
+  <div id="help-panel" role="dialog" aria-live="polite">
+    <button type="button" id="help-close" aria-label="닫기">✕</button>
+    <p>클릭한 순간부터 눌리고, 오래 누를수록 세게 눌려요. 새 왁스는 1.5초 이상 눌러야 처음 크게 갈라져요. 그 뒤로는 같은 곳을 몇 번 누르면 조각이 떨어져요. 드래그하면 시점을 돌려볼 수 있어요. 슬라임은 눌린 모양이 손을 떼면 되돌아가요. 왁뿌볼은 겉껍질은 갈라지지 않는 반투명 재질이고, 그 안의 왁스만 갈라지고 깨지는 게 비쳐 보여요. 조각은 떨어지지 않고, 모양은 눌린 뒤 천천히 원래대로 돌아가요.</p>
   </div>
 
   <script src="dist/bundle.js"></script>

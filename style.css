@@ -140,7 +140,8 @@ html, body {
    button opts back into pointer-events (see the rule just below), so it's
    the one deliberate way to dismiss the summary rather than any stray tap
    near the middle of the screen closing it instantly. */
-#completion-close {
+#completion-close,
+#help-close {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -160,8 +161,50 @@ html, body {
   pointer-events: auto;
 }
 
-#completion-close:hover {
+#completion-close:hover,
+#help-close:hover {
   background: var(--control-bg-hover);
+}
+
+/* The "?" button's on-demand explanation — same open/close pattern as the
+   completion banner (centered, only the X is interactive while it's not
+   shown), but left-aligned body text in a narrower column since this is a
+   paragraph to read, not a couple of short centered stats. */
+#help-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  width: min(280px, calc(100vw - 40px));
+  padding: 20px 24px;
+  border-radius: 18px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 16px 40px var(--panel-shadow);
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.6;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease, background 0.2s ease, color 0.2s ease;
+  z-index: 12;
+}
+
+#help-panel.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* Same reasoning as #completion-close: the panel itself stays non-interactive
+   (pointer-events: none, above) even while visible, so a stray tap on the
+   wax right behind it doesn't get eaten — only this close button opts back in. */
+#help-panel.visible #help-close {
+  pointer-events: auto;
+}
+
+#help-panel p {
+  margin: 0;
 }
 
 .completion-title {
@@ -237,8 +280,7 @@ html, body {
 .ui-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 #ui.collapsed .ui-header {
@@ -257,7 +299,8 @@ html, body {
   display: none;
 }
 
-#ui-toggle {
+#ui-toggle,
+#help-button {
   flex-shrink: 0;
   width: 32px;
   height: 32px;
@@ -271,8 +314,19 @@ html, body {
   transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
-#ui-toggle:hover {
+#ui-toggle:hover,
+#help-button:hover {
   background: var(--control-bg-hover);
+}
+
+/* Pushes the toggle to the far right of the header — h1 and #help-button
+   stay grouped together at the left via .ui-header's own small gap. */
+#ui-toggle {
+  margin-left: auto;
+}
+
+#ui.collapsed #help-button {
+  display: none;
 }
 
 #ui.collapsed #ui-toggle {
@@ -310,14 +364,19 @@ html, body {
   gap: 6px;
 }
 
+.button-row + .button-row {
+  margin-top: 6px;
+}
+
 .button-row button {
   flex: 1;
-  padding: 8px 6px;
+  padding: 8px 4px;
   border-radius: 10px;
   border: 1px solid var(--control-border);
   background: var(--control-bg);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }

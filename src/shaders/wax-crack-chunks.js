@@ -132,6 +132,17 @@ uniform sampler2D coreMap;
 uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette — see wax-material.js's setProjectionScale
 uniform float hazeAmount;
 uniform float sparkleAmount;
+// 0 only for "왁뿌볼"'s outer shell (see wax-material.js's SHELL_LOOK.waxbbuShell)
+// — turns off every crack-line/hole effect below so this skin stays a plain,
+// always-intact dome no matter how much crackDamage/holeMask have actually
+// risen underneath (that's now rendered on the CORE instead — see
+// CORE_FRAGMENT_COLOR). 1 everywhere else leaves this file's behavior unchanged.
+uniform float crackVisible;
+// 0..1, tracking OVERALL remaining wax (main.js), not this vertex's own
+// click damage — clay/slime only (crackVisible gates it off for waxbbuShell
+// too, same as the rest of this file) — see SHELL_FRAGMENT_COLOR's own doc
+// comment further down.
+uniform float shellCellRevealProgress;
 ${NOISE}
 `;
 
@@ -156,7 +167,7 @@ float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
 
 float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
 float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
-float crack = crackLine * crackSpread * (1.0 - vHoleMask);
+float crack = crackLine * crackSpread * (1.0 - vHoleMask) * crackVisible;
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
 vec4 hazeSample = texture2D(coreMap, hazeUv);
@@ -204,9 +215,29 @@ diffuseColor.rgb = mix(diffuseColor.rgb, glintHue, sparkleGlint * 0.55);
 // flat lighting, not just wherever a light happens to catch a bump.
 diffuseColor.rgb *= mix(1.0, 0.92 + 0.16 * grainHeight, sparkleAmount);
 
-diffuseColor.a = 1.0 - crack * 0.9;
+// Multiplied by the material's own opacity uniform (already in scope from
+// the standard common/color_fragment chunks re-included above) — without
+// this, a real material.opacity below 1 (see wax-material.js's waxbbuShell,
+// which needs a genuinely translucent skin) was silently ignored everywhere
+// except right at a crack line, since this line used to just overwrite
+// diffuseColor.a outright.
+diffuseColor.a = (1.0 - crack * 0.9) * opacity;
 
-if (vHoleMask > 0.5) discard;
+// 클레이/슬라임 only (crackVisible is 0 for waxbbuShell, making this a no-op
+// there — that shell never shows any of this, by design). Reuses the SAME
+// Voronoi cell partition the crack lines above already draw (same
+// crackCellFrequency) — hashes each cell's own identity to a fixed threshold
+// in 0..1, and discards that WHOLE cell (revealing the — already opaque —
+// core straight through, exactly like a real local break already does)
+// once OVERALL remaining wax crosses it, regardless of whether THIS spot
+// was ever actually clicked. Higher overall damage -> more scattered cells
+// across the WHOLE shell have crossed their own threshold, reading as wax
+// visibly flaking away everywhere, not just where you're pressing.
+vec4 shellCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
+float shellCellThreshold = waxHash3(shellCell.xyz).y;
+bool shellCellRevealed = shellCellThreshold < shellCellRevealProgress && crackVisible > 0.5;
+
+if ((vHoleMask > 0.5 && crackVisible > 0.5) || shellCellRevealed) discard;
 `;
 
 export const SHELL_FRAGMENT_ROUGHNESS = `#include <roughnessmap_fragment>
@@ -240,16 +271,37 @@ if (sparkleAmount > 0.0) {
 
 export const CORE_VERTEX_COMMON = `#include <common>
 varying vec3 vObjectPosition;
+// Shares the SAME per-vertex data the shell's own crack lines read (see
+// SHELL_VERTEX_COMMON) — added to the core geometry too (deformable-mesh.js)
+// purely so "왁뿌볼" mode can grow its OWN crack-line/hole network here (see
+// CORE_FRAGMENT_COLOR); a no-op varying for clay/slime, where
+// innerCrackVisible stays 0.
+attribute float crackDamage;
+attribute float holeMask;
+varying float vCrackDamage;
+varying float vHoleMask;
 `;
 
 export const CORE_VERTEX_BEGIN = `#include <begin_vertex>
 vObjectPosition = transformed;
+vCrackDamage = crackDamage;
+vHoleMask = holeMask;
 `;
 
 export const CORE_FRAGMENT_COMMON = `#include <common>
 varying vec3 vObjectPosition;
+varying float vCrackDamage;
+varying float vHoleMask;
 uniform sampler2D coreMap;
 uniform vec2 projectionScale; // source photo's own half-width/half-height, not the shape's silhouette — see wax-material.js's setProjectionScale
+// Only nonzero for "왁뿌볼" — see this block's own doc comment below.
+uniform float innerCrackVisible;
+uniform float crackCellFrequency;
+// 0..1, tracking OVERALL remaining wax (main.js), not this vertex's own
+// damage — see CORE_FRAGMENT_COLOR's own doc comment on cellRevealProgress.
+uniform float cellRevealProgress;
+uniform vec3 cellRevealColor;
+${NOISE}
 `;
 
 // The core texture is front-projected from the object's own XY position (not
@@ -262,5 +314,50 @@ vec4 coreSample = texture2D(coreMap, coreUv);
 // Same reasoning as the shell's hazeColor above: blend toward the app's own
 // neutral "no photo" gray wherever the source is transparent, instead of
 // showing whatever rgb happens to be stored under a transparent pixel.
-diffuseColor.rgb = mix(vec3(0.706), coreSample.rgb, coreSample.a);
+// A transparent PNG's edge/border pixels (alpha=0) also get sampled at any
+// side-facing geometry (e.g. a custom shape's beveled rim) that the
+// front-projection UV can't meaningfully cover at all — that fallback used
+// to be a flat neutral grey (0.706 all channels), which read as a jarring,
+// clearly-different patch there rather than a believable continuation of
+// the wax. Warmed toward a pale cream tone instead — still not the actual
+// photo (a real fix would need the projection to wrap side-facing geometry,
+// out of scope here), but far less visually jarring.
+vec3 photoColor = mix(vec3(0.85, 0.79, 0.68), coreSample.rgb, coreSample.a);
+
+// "왁뿌볼" only (innerCrackVisible is 0 everywhere else, making all of this a
+// no-op and leaving photoColor as the final result exactly as before): the
+// wax keeps the user's own photo/color — it grows the same style of Voronoi
+// crack-line network the shell normally shows (see SHELL_FRAGMENT_COLOR),
+// darkening that same color rather than alpha-gapping it, since there's
+// nothing further inside to reveal through a growing crack (yet — see
+// discard below). Once damage actually crosses the break threshold at a
+// vertex (holeMask — same shared field and same 0.5 cutoff the shell used
+// to discard at), this DOES discard for real: that's a genuine hole, not a
+// tint, revealing DeformableMesh's fillingMesh (a plain white solid layer
+// just inside the core) rather than empty space.
+vec2 innerVoronoi = waxVoronoi(vObjectPosition * crackCellFrequency);
+float innerCrackLine = 1.0 - smoothstep(0.0, 0.09, innerVoronoi.y - innerVoronoi.x);
+float innerCrackSpread = smoothstep(0.0, 0.3, vCrackDamage);
+float innerCrack = innerCrackLine * innerCrackSpread * (1.0 - vHoleMask) * innerCrackVisible;
+
+vec3 baseWax = mix(photoColor, photoColor * 0.7, innerCrack);
+
+// "왁뿌볼" only, and GLOBAL rather than local (cellRevealProgress tracks
+// overall remaining wax, not this vertex's own click damage) — "왁스가 점점
+// 투명해지는 게 아니라 (실제 앱처럼) 조각이 통째로 사라지는" way: reuses the
+// SAME Voronoi cell partition the crack lines already draw (same
+// crackCellFrequency), hashes each cell's own identity to a fixed, evenly-
+// spread threshold in 0..1, and swaps that WHOLE cell over to
+// cellRevealColor (the filling's own current color, kept in sync from
+// main.js — see wax-material.js's setCellReveal) the moment overall
+// progress crosses it. Higher overall progress -> more cells (a growing,
+// randomly-scattered fraction of them) have crossed their own threshold,
+// so what's left reads as fewer, smaller surviving islands of wax — not a
+// uniform color fade.
+vec4 innerCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
+float cellThreshold = waxHash3(innerCell.xyz).y;
+float cellRevealed = step(cellThreshold, cellRevealProgress) * innerCrackVisible;
+diffuseColor.rgb = mix(baseWax, cellRevealColor, cellRevealed);
+
+if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
 `;

@@ -51,6 +51,40 @@ const WAX_TYPE_SOUND = {
   },
 };
 
+// butter/milk asked for "초콜릿과 동일한 사운드" — literally the same sample
+// references, not a separate duplicate pool. strawberry/grape asked for
+// "기본 왁스와 동일한 사운드", which for "basic" means no entry at all here
+// (see the lookup in playMaterialSound below) — so they're deliberately left
+// unlisted rather than added with empty pools.
+WAX_TYPE_SOUND.butter = WAX_TYPE_SOUND.chocolate;
+WAX_TYPE_SOUND.milk = WAX_TYPE_SOUND.chocolate;
+
+// "왁뿌볼" (see playWaxbbuSound below): the very first break sounds exactly
+// like slime's own first break (SLIME_FIRST_BREAK_SOUND, reused directly —
+// no separate sample). Every poke after that always plays a random pick from
+// slime's own regular pool (SLIME_SOUND_POOL) as a base layer, PLUS one more
+// sample layered on top picked from whichever of these two pools matches how
+// much wax is left — "깨진 후 ~ 40%"'s lighter cracking vs. "40% 이하"'s
+// heavier, calmer stone-cracking.
+const WAXBBU_CRACK_POOL_ABOVE_40 = [
+  'sounds/freesound_community-cracking-66624_[cut_1sec].mp3',
+  'sounds/freesound_community-cracking-66624_[cut_1sec] (1).mp3',
+  'sounds/freesound_community-cracking-66624_[cut_1sec] (2).mp3',
+  'sounds/freesound_community-cracking-66624_[cut_1sec] (3).mp3',
+  'sounds/freesound_community-cracking-66624_[cut_1sec] (4).mp3',
+  'sounds/freesound_community-cracking-66624_[cut_1sec] (5).mp3',
+  'sounds/freesound_community-cracking-66624_[cut_1sec] (6).mp3',
+];
+const WAXBBU_CRACK_POOL_AT_OR_BELOW_40 = [
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_0sec].mp3',
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (1).mp3',
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (2).mp3',
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (3).mp3',
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (4).mp3',
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (5).mp3',
+  'sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec].mp3',
+];
+
 // Played on every pointerdown while a wax hasn't broken once yet — an
 // audible "hairline crack" cue for each attempt at building up to the first
 // dramatic break, not just the break itself (which already has its own
@@ -95,7 +129,8 @@ export function playFirstAttemptCrackSound() {
  * slightly louder. isFirstBreak plays the dedicated first-crack sample
  * instead of a random pick from the regular pool — same pattern for both
  * materials. waxType layers an additional shell-specific sample on top (see
- * WAX_TYPE_SOUND) when the current wax type has one — "basic" doesn't.
+ * WAX_TYPE_SOUND) when the current wax type has one — "basic" doesn't. Not
+ * used for "왁뿌볼" at all — see playWaxbbuSound below.
  */
 export function playMaterialSound(materialMode, waxType, strength = 1, isFirstBreak = false) {
   if (masterVolume <= 0) return;
@@ -110,4 +145,24 @@ export function playMaterialSound(materialMode, waxType, strength = 1, isFirstBr
       : waxTypeSound.pool[Math.floor(Math.random() * waxTypeSound.pool.length)];
     playOne(src, strength);
   }
+}
+
+/**
+ * "왁뿌볼" only. tier is 'first' | 'mid' | 'low' — main.js picks it from
+ * isFirstBreak / deformable.getRemainingWaxRatio() (mid: >40% left, low:
+ * <=40%). 'first' just plays slime's own first-break sample alone; 'mid'/
+ * 'low' always layer a random slime regular-pool pick underneath a random
+ * pick from the matching crack pool above.
+ */
+export function playWaxbbuSound(tier, strength = 1) {
+  if (masterVolume <= 0) return;
+
+  if (tier === 'first') {
+    playOne(SLIME_FIRST_BREAK_SOUND, strength);
+    return;
+  }
+
+  playOne(SLIME_SOUND_POOL[Math.floor(Math.random() * SLIME_SOUND_POOL.length)], strength);
+  const crackPool = tier === 'low' ? WAXBBU_CRACK_POOL_AT_OR_BELOW_40 : WAXBBU_CRACK_POOL_ABOVE_40;
+  playOne(crackPool[Math.floor(Math.random() * crackPool.length)], strength);
 }
