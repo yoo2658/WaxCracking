@@ -351,9 +351,8 @@ export function setCoreMaterialMode(coreMaterial, mode) {
   coreMaterial.side = look.side ?? THREE.DoubleSide;
 }
 
-/** Applies a wax-type preset (basic/chocolate/…) to the shell only — leaves the core (clay/slime physics look) and the user's chosen color/photo untouched. */
-export function setShellLook(shellMaterial, waxType) {
-  const look = SHELL_LOOK[waxType] ?? SHELL_LOOK.basic;
+/** Shared by setShellLook (a named SHELL_LOOK preset) and setCroissantLayerLook (a computed, not-in-that-table look) below — both just need to shove a look object's fields onto a shell material. */
+function applyShellLook(shellMaterial, look) {
   const uniforms = shellMaterial.userData.waxUniforms;
   uniforms.waxColor.value.set(look.waxColor);
   uniforms.hazeAmount.value = look.hazeAmount;
@@ -367,6 +366,51 @@ export function setShellLook(shellMaterial, waxType) {
   shellMaterial.clearcoatRoughness = look.clearcoatRoughness;
   shellMaterial.opacity = look.opacity ?? 1;
   shellMaterial.side = look.side ?? THREE.DoubleSide;
+}
+
+/** Applies a wax-type preset (basic/chocolate/…) to the shell only — leaves the core (clay/slime physics look) and the user's chosen color/photo untouched. */
+export function setShellLook(shellMaterial, waxType) {
+  applyShellLook(shellMaterial, SHELL_LOOK[waxType] ?? SHELL_LOOK.basic);
+}
+
+// 크루아상's two ENDPOINT looks — a real crusty golden-brown outside, easing
+// into a paler, softer dough right against the core. Every one of
+// 크루아상's actual layers (however many there are — see
+// deformable-mesh.js's layerCount) gets an evenly-interpolated step between
+// these two, computed fresh below rather than hand-picked per layer, so
+// changing the LAYER COUNT alone (main.js) automatically re-spaces the
+// gradient across however many steps that is, and adjusting either endpoint
+// here reshapes every layer's color/gloss consistently instead of needing
+// each one hand-edited. Same opaque-coating structure as chocolate/butter
+// (hazeAmount 0 — a thick multi-layer coating like this should read as fully
+// opaque, only showing what's inside once actually broken through, not
+// hazy).
+const CROISSANT_OUTER_LOOK = { waxColor: 0xa8631f, waxRoughnessBase: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.2 };
+const CROISSANT_INNER_LOOK = { waxColor: 0xf7ecd0, waxRoughnessBase: 0.6, clearcoat: 0.15, clearcoatRoughness: 0.5 };
+const croissantColorScratch = new THREE.Color();
+const croissantOuterColor = new THREE.Color(CROISSANT_OUTER_LOOK.waxColor);
+const croissantInnerColor = new THREE.Color(CROISSANT_INNER_LOOK.waxColor);
+
+/**
+ * Applies layer `layerIndex`'s (0 = outermost) own step of the crust→dough
+ * gradient to one of 크루아상's shell materials — color AND gloss both
+ * interpolated together (a crusty layer should look glossier, a doughy one
+ * more matte, not just a different flat color) — see
+ * CROISSANT_OUTER_LOOK/INNER_LOOK's own comment. layerCount 1 collapses to
+ * the outer look outright (t=0) — never actually hit in practice (크루아상
+ * always has more than one layer) but avoids a divide-by-zero.
+ */
+export function setCroissantLayerLook(shellMaterial, layerIndex, layerCount) {
+  const t = layerCount <= 1 ? 0 : layerIndex / (layerCount - 1);
+  croissantColorScratch.copy(croissantOuterColor).lerp(croissantInnerColor, t);
+  applyShellLook(shellMaterial, {
+    waxColor: croissantColorScratch.getHex(),
+    hazeAmount: 0,
+    waxRoughnessBase: THREE.MathUtils.lerp(CROISSANT_OUTER_LOOK.waxRoughnessBase, CROISSANT_INNER_LOOK.waxRoughnessBase, t),
+    clearcoat: THREE.MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoat, CROISSANT_INNER_LOOK.clearcoat, t),
+    clearcoatRoughness: THREE.MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoatRoughness, CROISSANT_INNER_LOOK.clearcoatRoughness, t),
+    sparkleAmount: 0,
+  });
 }
 
 /**

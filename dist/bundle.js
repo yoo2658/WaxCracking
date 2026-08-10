@@ -32022,6 +32022,30 @@ void main() {
   var BULGE_PEAK_RATIO = 1;
   var BULGE_OUTER_RATIO = 1.6;
   var BULGE_STRENGTH = 0.5;
+  var MULTI_LAYER_TOUGHNESS_MULTIPLIER = 1.5;
+  var LAYER_FRAGMENT_COUNT_OUTERMOST = 6;
+  var LAYER_FRAGMENT_COUNT_INNERMOST = 1;
+  function fragmentCountForLayer(layerIndex, layerCount) {
+    if (layerCount <= 1) return 1;
+    const t = layerIndex / (layerCount - 1);
+    return Math.round(MathUtils.lerp(LAYER_FRAGMENT_COUNT_OUTERMOST, LAYER_FRAGMENT_COUNT_INNERMOST, t));
+  }
+  var LAYER_HOLE_RADIUS_MULTIPLIER_OUTERMOST = 1.4;
+  var LAYER_HOLE_RADIUS_MULTIPLIER_INNERMOST = 0.65;
+  function holeRadiusMultiplierForLayer(layerIndex, layerCount) {
+    if (layerCount <= 1) return 1;
+    const t = layerIndex / (layerCount - 1);
+    return MathUtils.lerp(LAYER_HOLE_RADIUS_MULTIPLIER_OUTERMOST, LAYER_HOLE_RADIUS_MULTIPLIER_INNERMOST, t);
+  }
+  function effectiveHoleRadiusMultiplierForLayer(layerIndex, layerCount, remainingRatio) {
+    const base = holeRadiusMultiplierForLayer(layerIndex, layerCount);
+    if (layerCount <= 1 || remainingRatio >= CLEANUP_REMAINING_THRESHOLD) return base;
+    const cleanupT = 1 - remainingRatio / CLEANUP_REMAINING_THRESHOLD;
+    return MathUtils.lerp(base, LAYER_HOLE_RADIUS_MULTIPLIER_OUTERMOST, cleanupT);
+  }
+  var HOLE_EDGE_JITTER = 0.35;
+  var LOW_FRAGMENT_REMAINING_THRESHOLD = 0.15;
+  var CLEANUP_REMAINING_THRESHOLD = 0.2;
   var DeformableMesh = class {
     /**
      * containmentRadiusPerVertex (default null — a no-op for every existing
@@ -32050,9 +32074,11 @@ void main() {
      * that patch's own (much larger) radius as its limit, regardless of how
      * dented some unrelated other spot on the shell currently is.
      */
-    constructor(geometry, coreMaterial2, shellMaterial2, fillingMaterial2) {
+    constructor(geometry, coreMaterial2, shellMaterials, fillingMaterial2) {
       this.materialMode = "clay";
       this.containmentRadiusPerVertex = null;
+      this.layerCount = shellMaterials.length;
+      this.crackRateMultiplier = this.layerCount > 1 ? 1 / MULTI_LAYER_TOUGHNESS_MULTIPLIER : 1;
       geometry.computeBoundingSphere();
       this.radius = geometry.boundingSphere.radius;
       this.localDepth = geometry.userData.localDepth ?? this.radius * 2;
@@ -32064,29 +32090,29 @@ void main() {
       this.maxDisplacementRim = Math.min(this.maxDisplacementFlat, minFeatureRadius * RIM_DISPLACEMENT_SAFETY_RATIO);
       this.curvatureSafety = geometry.userData.curvatureSafety ?? new Float32Array(geometry.attributes.position.count).fill(1);
       this.imageFrameHalfExtent = geometry.userData.imageFrameHalfExtent ?? { x: this.radius, y: this.radius };
-      this.shellThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
+      const perLayerThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
       this.fillingInset = thicknessAxis * FILLING_INSET_RATIO;
-      const shellGeometry = geometry;
-      const coreGeometry = geometry.clone();
-      const fillingGeometry = geometry.clone();
-      const shellPositionAttr = shellGeometry.attributes.position;
-      this.vertexCount = shellPositionAttr.count;
-      const shellRestPosition = shellPositionAttr.array;
-      const shellClearance = geometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
+      const baseGeometry = geometry;
+      const basePositionAttr = baseGeometry.attributes.position;
+      this.vertexCount = basePositionAttr.count;
+      const baseRestPosition = basePositionAttr.array;
+      const shellClearance = baseGeometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
       this.localShellThickness = new Float32Array(this.vertexCount);
       for (let v = 0; v < this.vertexCount; v++) {
-        this.localShellThickness[v] = Math.min(this.shellThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
+        const totalThickness = perLayerThickness * this.layerCount;
+        const clampedTotal = Math.min(totalThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
+        this.localShellThickness[v] = clampedTotal / this.layerCount;
       }
-      const shellNormalAttr = shellGeometry.attributes.normal;
+      const baseNormalAttr = baseGeometry.attributes.normal;
       this.restNormal = new Float32Array(this.vertexCount * 3);
-      if (shellNormalAttr) {
-        this.restNormal.set(shellNormalAttr.array);
+      if (baseNormalAttr) {
+        this.restNormal.set(baseNormalAttr.array);
       } else {
         for (let v = 0; v < this.vertexCount; v++) {
           const i3 = v * 3;
-          const x = shellRestPosition[i3];
-          const y = shellRestPosition[i3 + 1];
-          const z = shellRestPosition[i3 + 2];
+          const x = baseRestPosition[i3];
+          const y = baseRestPosition[i3 + 1];
+          const z = baseRestPosition[i3 + 2];
           const len = Math.sqrt(x * x + y * y + z * z) || 1;
           this.restNormal[i3] = x / len;
           this.restNormal[i3 + 1] = y / len;
@@ -32096,25 +32122,29 @@ void main() {
       this.restPosition = new Float32Array(this.vertexCount * 3);
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const t = this.localShellThickness[v];
-        this.restPosition[i3] = shellRestPosition[i3] - this.restNormal[i3] * t;
-        this.restPosition[i3 + 1] = shellRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
-        this.restPosition[i3 + 2] = shellRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
+        const t = this.localShellThickness[v] * this.layerCount;
+        this.restPosition[i3] = baseRestPosition[i3] - this.restNormal[i3] * t;
+        this.restPosition[i3 + 1] = baseRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
+        this.restPosition[i3 + 2] = baseRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
       }
+      const coreGeometry = baseGeometry.clone();
       coreGeometry.attributes.position.array.set(this.restPosition);
       coreGeometry.attributes.position.needsUpdate = true;
       coreGeometry.computeVertexNormals();
-      this.cellRevealThreshold = new Float32Array(this.vertexCount);
-      for (let v = 0; v < this.vertexCount; v++) {
-        const i3 = v * 3;
-        const cellId = waxVoronoiCellId(
-          this.restPosition[i3] * CELL_REVEAL_FREQUENCY,
-          this.restPosition[i3 + 1] * CELL_REVEAL_FREQUENCY,
-          this.restPosition[i3 + 2] * CELL_REVEAL_FREQUENCY
-        );
-        this.cellRevealThreshold[v] = waxHash3(cellId[0], cellId[1], cellId[2])[1];
+      if (this.layerCount === 1) {
+        this.cellRevealThreshold = new Float32Array(this.vertexCount);
+        for (let v = 0; v < this.vertexCount; v++) {
+          const i3 = v * 3;
+          const cellId = waxVoronoiCellId(
+            this.restPosition[i3] * CELL_REVEAL_FREQUENCY,
+            this.restPosition[i3 + 1] * CELL_REVEAL_FREQUENCY,
+            this.restPosition[i3 + 2] * CELL_REVEAL_FREQUENCY
+          );
+          this.cellRevealThreshold[v] = waxHash3(cellId[0], cellId[1], cellId[2])[1];
+        }
       }
       this.globalRevealProgress = 0;
+      const fillingGeometry = baseGeometry.clone();
       const fillingRestPosition = new Float32Array(this.vertexCount * 3);
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
@@ -32130,21 +32160,29 @@ void main() {
       this.elasticDecay = 0;
       this._elasticHeld = false;
       const crackDamage = new Float32Array(this.vertexCount);
-      shellGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
-      coreGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
       this.crackDamage = crackDamage;
-      const holeMask = new Float32Array(this.vertexCount);
-      shellGeometry.setAttribute("holeMask", new BufferAttribute(holeMask, 1));
-      coreGeometry.setAttribute("holeMask", new BufferAttribute(holeMask, 1));
-      this.holeMask = holeMask;
-      this._localHoleMask = new Float32Array(this.vertexCount);
+      this.layers = [];
+      for (let k = 0; k < this.layerCount; k++) {
+        const layerGeometry = baseGeometry.clone();
+        layerGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
+        const localHoleMask = new Float32Array(this.vertexCount);
+        const holeMask = this.layerCount === 1 ? new Float32Array(this.vertexCount) : localHoleMask;
+        layerGeometry.setAttribute("holeMask", new BufferAttribute(holeMask, 1));
+        const shellMaterial2 = shellMaterials[k];
+        const shellMesh = new Mesh(layerGeometry, shellMaterial2);
+        shellMesh.matrixAutoUpdate = false;
+        shellMesh.renderOrder = this.layerCount - 1 - k;
+        this.layers.push({ shellGeometry: layerGeometry, shellMesh, shellMaterial: shellMaterial2, _localHoleMask: localHoleMask, holeMask });
+      }
+      this.shellGeometry = this.layers[0].shellGeometry;
+      this.shellMeshes = this.layers.map((layer) => layer.shellMesh);
+      this.mesh = this.shellMeshes[0];
       this.coreGeometry = coreGeometry;
-      this.shellGeometry = shellGeometry;
+      coreGeometry.setAttribute("crackDamage", new BufferAttribute(crackDamage, 1));
+      coreGeometry.setAttribute("holeMask", new BufferAttribute(this.layers[0].holeMask, 1));
       this.fillingGeometry = fillingGeometry;
       this.coreMesh = new Mesh(coreGeometry, coreMaterial2);
       this.coreMesh.matrixAutoUpdate = false;
-      this.mesh = new Mesh(shellGeometry, shellMaterial2);
-      this.mesh.matrixAutoUpdate = false;
       this.fillingMesh = new Mesh(fillingGeometry, fillingMaterial2);
       this.fillingMesh.matrixAutoUpdate = false;
       this._dirtyPosition = false;
@@ -32219,9 +32257,16 @@ void main() {
      * long hold or several separate taps. holdSeconds is how long the CURRENT
      * continuous press has lasted; it only matters for a wax that has never
      * broken at all yet (see hasBrokenOnce below). Returns a fragment-pop
-     * descriptor ({ point, radius }) the moment a chunk actually breaks loose,
-     * or null otherwise — the caller uses this to spawn a falling debris piece
-     * and play the break sound in sync, even mid-hold.
+     * descriptor ({ point, radius, color }) the moment a chunk actually breaks
+     * loose, or null otherwise — the caller uses this to spawn a falling
+     * debris piece (in that broken layer's own color) and play the break
+     * sound in sync, even mid-hold.
+     *
+     * The dent/bulge displacement itself (plasticOffset/elasticSnapshot) is
+     * shared, core-level state — pressing a multi-layer 크루아상 spot
+     * compresses the WHOLE stack together, same as pressing anywhere else;
+     * layers are purely a shell-surface crack/hole/reveal concept layered on
+     * top of that shared dent, not extra independent physics per layer.
      */
     poke(pointWorld, normal, strength = 1, holdSeconds = 0) {
       const rest = this.restPosition;
@@ -32277,7 +32322,7 @@ void main() {
         target[i3 + 1] += pushY * depth * dentWeight + restNormal[i3 + 1] * depth * BULGE_STRENGTH * bulgeWeight;
         target[i3 + 2] += pushZ * depth * dentWeight + restNormal[i3 + 2] * depth * BULGE_STRENGTH * bulgeWeight;
         if (dentWeight > 0) {
-          const next = this.crackDamage[v] + dentWeight * CRACK_RATE_PER_HIT * strength;
+          const next = this.crackDamage[v] + dentWeight * CRACK_RATE_PER_HIT * strength * this.crackRateMultiplier;
           this.crackDamage[v] = next > 1 ? 1 : next;
         }
       }
@@ -32287,26 +32332,52 @@ void main() {
       return this._checkBreak(pointWorld, normal, nearestIndex, holdSeconds);
     }
     /**
-     * Decides whether this poke just broke a chunk loose. Guarded by holeMask
-     * at the nearest vertex first: once the shell there has already fully
-     * opened up, there's no wax left to pop, so pressing on the exposed core
-     * underneath never spawns more debris (also what stops the very hole that
-     * just opened from immediately re-triggering next frame).
+     * Decides whether this poke just broke every remaining layer loose at
+     * once (see class doc comment). Guarded by the INNERMOST layer's holeMask
+     * at the nearest vertex first — NOT the outermost: since each layer's own
+     * hole radius tapers narrower toward the core (see
+     * holeRadiusMultiplierForLayer — "겉면이 제일 많이 떨어지고, 안쪽으로
+     * 갈수록 조금씩만"), a single break opens a WIDE area on the outermost
+     * layer but only a NARROWER area on the innermost one, so plenty of
+     * vertices end up with the outer layer already gone while an inner layer
+     * is still very much intact right there. Guarding on the outermost layer
+     * alone made every one of those spots permanently unbreakable the moment
+     * the outer layer opened nearby — confirmed directly: pressing on the
+     * "ring" around an already-opened hole did nothing no matter how many
+     * times it was hit ("겉면을 한 번 부수면 아무리 눌러도 두 번째와 세 번째가
+     * 안 깨지는데"). The innermost layer's own radius is a strict subset of
+     * every other layer's for the exact same break (same center, always a
+     * smaller radius) — so if IT'S already open somewhere, every other layer
+     * there necessarily already is too, making it the correct "truly nothing
+     * left to break here" check. For layerCount 1 the outermost and innermost
+     * are literally the same one layer, so this is unchanged from before.
      */
     _checkBreak(pointWorld, normal, nearestIndex, holdSeconds) {
-      if (this.holeMask[nearestIndex] > 0.5) return null;
+      if (this.layers[this.layerCount - 1].holeMask[nearestIndex] > 0.5) return null;
+      const remainingRatio = this.layerCount > 1 ? this.getRemainingWaxRatio() : 1;
+      const innermostColor = this.layers[this.layerCount - 1].shellMaterial.userData.waxUniforms.waxColor.value;
+      const colors = this.layerCount > 1 && remainingRatio <= LOW_FRAGMENT_REMAINING_THRESHOLD ? [innermostColor] : this.layers.flatMap((layer, k) => {
+        const color = layer.shellMaterial.userData.waxUniforms.waxColor.value;
+        return Array(fragmentCountForLayer(k, this.layerCount)).fill(color);
+      });
       const influenceRadius = this._influenceRadiusFor(this.curvatureSafety[nearestIndex]);
       if (!this.hasBrokenOnce) {
         if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
         this.hasBrokenOnce = true;
         this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
-        this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
-        return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
+        this.layers.forEach((layer, k) => {
+          const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
+          this._boostHoleAt(layer, pointWorld, normal, holeRadius);
+        });
+        return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true, colors };
       }
       if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
       this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
-      this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
-      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+      this.layers.forEach((layer, k) => {
+        const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
+        this._boostHoleAt(layer, pointWorld, normal, holeRadius);
+      });
+      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false, colors };
     }
     /**
      * Shared by _boostCrackAt/_boostHoleAt below, which are otherwise
@@ -32318,34 +32389,52 @@ void main() {
      * exactly the "속이 비어서 반대편이 보이는" symptom this cycle set out to
      * fix. Only breaks fire this (not every frame), but it still defers the
      * sqrt past the cheap squared-distance range check, same as poke().
+     *
+     * jitterAmount (0 = perfectly smooth/circular, the old and only shape
+     * every break used to come out as — "뚫린 모양이 똑같다") randomly
+     * perturbs each vertex's effective distance from the click point by up to
+     * that fraction, so the resulting boundary comes out jagged/irregular
+     * instead of a clean circle. The random seed is freshly rolled EACH CALL
+     * (not derived from vertex position alone), so the exact same click point
+     * tears a differently-shaped hole from one break to the next, not just a
+     * fixed jagged pattern that happens to look different at different
+     * points on the shape.
      */
-    _boostFieldAt(field, pointWorld, normal, radius) {
+    _boostFieldAt(field, pointWorld, normal, radius, jitterAmount = 0) {
       const rest = this.restPosition;
       const restNormal = this.restNormal;
-      const radiusSq = radius * radius;
+      const searchRadius = radius * (1 + jitterAmount);
+      const searchRadiusSq = searchRadius * searchRadius;
+      const seedX = jitterAmount > 0 ? Math.random() * 1e3 : 0;
+      const seedY = jitterAmount > 0 ? Math.random() * 1e3 : 0;
+      const seedZ = jitterAmount > 0 ? Math.random() * 1e3 : 0;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
         const dx = rest[i3] - pointWorld.x;
         const dy = rest[i3 + 1] - pointWorld.y;
         const dz = rest[i3 + 2] - pointWorld.z;
         const distSq = dx * dx + dy * dy + dz * dz;
-        if (distSq >= radiusSq) continue;
+        if (distSq >= searchRadiusSq) continue;
         const alignDot = restNormal[i3] * normal.x + restNormal[i3 + 1] * normal.y + restNormal[i3 + 2] * normal.z;
         const alignWeight = MathUtils.smoothstep(alignDot, NORMAL_ALIGN_GATE_START, NORMAL_ALIGN_GATE_END);
         if (alignWeight <= 0) continue;
-        const dist = Math.sqrt(distSq);
+        let dist = Math.sqrt(distSq);
+        if (jitterAmount > 0) {
+          const n = fractSin((rest[i3] + seedX) * 12.9898 + (rest[i3 + 1] + seedY) * 78.233 + (rest[i3 + 2] + seedZ) * 37.719);
+          dist *= 1 + (n - 0.5) * 2 * jitterAmount;
+        }
         const weight = MathUtils.smoothstep(radius - dist, 0, radius) * alignWeight;
         field[v] = Math.max(field[v], weight);
       }
       this._dirtyAttributes = true;
     }
-    /** Widens the visible crack network around a point without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. */
+    /** Widens the visible crack network around a point, without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. crackDamage is shared across the whole layer stack (see class doc comment), so unlike _boostHoleAt this needs no layer argument. Deliberately NOT jittered (see HOLE_EDGE_JITTER's own comment) — the crack network already reads as organic via the shader's own Voronoi pattern regardless of this field's own (still smooth) boundary shape. */
     _boostCrackAt(pointWorld, normal, radius) {
       this._boostFieldAt(this.crackDamage, pointWorld, normal, radius);
     }
-    /** Marks the spot a chunk just fell off of as a clean hole — no crack cosmetics there, and the shader discards it so what's underneath shows through. Writes to _localHoleMask, NOT the GPU-facing holeMask directly — see that field's own doc comment; update()'s _applyGlobalReveal merges the two every frame. */
-    _boostHoleAt(pointWorld, normal, radius) {
-      this._boostFieldAt(this._localHoleMask, pointWorld, normal, radius);
+    /** Marks the spot a chunk just fell off of, on ONE layer, as a clean hole — no crack cosmetics there, and the shader discards it so what's underneath (the next layer in, or the core) shows through. Writes to that layer's _localHoleMask, NOT necessarily its GPU-facing holeMask directly — see that field's own doc comment; update()'s _applyGlobalReveal merges the two every frame for the single-layer case (the two are literally the same array for a multi-layer 크루아상, so this already IS the final value there). */
+    _boostHoleAt(layer, pointWorld, normal, radius) {
+      this._boostFieldAt(layer._localHoleMask, pointWorld, normal, radius, HOLE_EDGE_JITTER);
     }
     /**
      * Clamps each vertex's displacement field to ITS OWN safe limit
@@ -32400,15 +32489,17 @@ void main() {
         }
         needsPositionRebuild = true;
       }
-      if (this._dirtyAttributes && this._applyGlobalReveal()) {
+      if (this.layerCount === 1 && this._dirtyAttributes && this._applyGlobalReveal()) {
         needsPositionRebuild = true;
       }
       if (needsPositionRebuild) {
         this._rebuildPositions();
       }
       if (this._dirtyAttributes) {
-        this.shellGeometry.attributes.crackDamage.needsUpdate = true;
-        this.shellGeometry.attributes.holeMask.needsUpdate = true;
+        for (const layer of this.layers) {
+          layer.shellGeometry.attributes.crackDamage.needsUpdate = true;
+          layer.shellGeometry.attributes.holeMask.needsUpdate = true;
+        }
         this.coreGeometry.attributes.crackDamage.needsUpdate = true;
         this.coreGeometry.attributes.holeMask.needsUpdate = true;
         this._dirtyAttributes = false;
@@ -32417,20 +32508,24 @@ void main() {
       return needsPositionRebuild;
     }
     /**
-     * Merges the "왁스가 여기저기 사라지는" global reveal into the real,
-     * GPU/gameplay-facing holeMask (see that field's own doc comment) — a
-     * vertex becomes gone there the moment EITHER a real local break covers it
-     * (_localHoleMask) OR its own fixed cellRevealThreshold is crossed by
-     * globalRevealProgress, which is itself driven by getLocalRemainingRatio()
-     * — LOCAL-only progress, so revealing more cells here can never feed back
-     * into revealing even more (no runaway cascade). Returns true if any
-     * vertex's merged value actually changed this call.
+     * Merges the "왁스가 여기저기 사라지는" global reveal into the outermost
+     * (and, for the single-layer case, only) layer's real, GPU/gameplay-facing
+     * holeMask (see that field's own doc comment) — a vertex becomes gone
+     * there the moment EITHER a real local break covers it (_localHoleMask) OR
+     * its own fixed cellRevealThreshold is crossed by globalRevealProgress,
+     * which is itself driven by getLocalRemainingRatio() — LOCAL-only
+     * progress, so revealing more cells here can never feed back into
+     * revealing even more (no runaway cascade). Returns true if any vertex's
+     * merged value actually changed this call. Only ever invoked for
+     * layerCount === 1 — see that field's own doc comment on why 크루아상
+     * skips this mechanic entirely.
      */
     _applyGlobalReveal() {
+      const layer = this.layers[0];
       this.globalRevealProgress = 1 - this.getLocalRemainingRatio();
       const threshold = this.cellRevealThreshold;
-      const local = this._localHoleMask;
-      const hole = this.holeMask;
+      const local = layer._localHoleMask;
+      const hole = layer.holeMask;
       const progress = this.globalRevealProgress;
       let changed = false;
       for (let v = 0; v < this.vertexCount; v++) {
@@ -32442,9 +32537,23 @@ void main() {
       }
       return changed;
     }
+    /**
+     * Every layer's outer surface = the core's own position, plus that layer's
+     * own gap, plus every layer BELOW it (closer to the core)'s own gap too —
+     * stacked innermost-out (see class doc comment). Walking the layer array
+     * from the innermost index down to 0 while accumulating a running offset
+     * builds exactly that: by the time the loop reaches layer k, the running
+     * offset already holds every inner layer's contribution, so adding just
+     * that one layer's own gap lands exactly on its true outer surface. If
+     * layer k's own gap has collapsed to 0 (its hole is open there), its
+     * position ends up IDENTICAL to the layer just inside it — flush, with
+     * layer k's own fragment shader discarding there (see
+     * wax-crack-chunks.js), so what actually shows through is that next layer
+     * in (or the bare core, once every layer's gap is 0). For layerCount 1
+     * this reduces to exactly the old single "shell = core + one gap" formula.
+     */
     _rebuildPositions() {
       const corePos = this.coreGeometry.attributes.position.array;
-      const shellPos = this.shellGeometry.attributes.position.array;
       const fillingPos = this.fillingGeometry.attributes.position.array;
       const rest = this.restPosition;
       const restNormal = this.restNormal;
@@ -32453,12 +32562,12 @@ void main() {
       const decay = this.elasticDecay;
       const localShellThickness = this.localShellThickness;
       const fillingInset = this.fillingInset;
-      const holeMask = this.holeMask;
+      const layers = this.layers;
+      const layerCount = this.layerCount;
       const holeAffectsGap = this.materialMode !== "waxbbu";
       const containmentRadiusPerVertex = this.containmentRadiusPerVertex;
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const gap = holeAffectsGap ? localShellThickness[v] * (1 - holeMask[v]) : localShellThickness[v];
         let cx = rest[i3] + plastic[i3] + elastic[i3] * decay;
         let cy = rest[i3 + 1] + plastic[i3 + 1] + elastic[i3 + 1] * decay;
         let cz = rest[i3 + 2] + plastic[i3 + 2] + elastic[i3 + 2] * decay;
@@ -32476,19 +32585,33 @@ void main() {
         corePos[i3] = cx;
         corePos[i3 + 1] = cy;
         corePos[i3 + 2] = cz;
-        shellPos[i3] = cx + restNormal[i3] * gap;
-        shellPos[i3 + 1] = cy + restNormal[i3 + 1] * gap;
-        shellPos[i3 + 2] = cz + restNormal[i3 + 2] * gap;
         fillingPos[i3] = cx - restNormal[i3] * fillingInset;
         fillingPos[i3 + 1] = cy - restNormal[i3 + 1] * fillingInset;
         fillingPos[i3 + 2] = cz - restNormal[i3 + 2] * fillingInset;
+        let cumX = cx;
+        let cumY = cy;
+        let cumZ = cz;
+        for (let k = layerCount - 1; k >= 0; k--) {
+          const layer = layers[k];
+          const gap = holeAffectsGap ? localShellThickness[v] * (1 - layer.holeMask[v]) : localShellThickness[v];
+          cumX += restNormal[i3] * gap;
+          cumY += restNormal[i3 + 1] * gap;
+          cumZ += restNormal[i3 + 2] * gap;
+          const shellPos = layer.shellGeometry.attributes.position.array;
+          shellPos[i3] = cumX;
+          shellPos[i3 + 1] = cumY;
+          shellPos[i3 + 2] = cumZ;
+        }
       }
       this.coreGeometry.attributes.position.needsUpdate = true;
-      this.shellGeometry.attributes.position.needsUpdate = true;
       this.fillingGeometry.attributes.position.needsUpdate = true;
       this.coreGeometry.computeVertexNormals();
-      this.shellGeometry.computeVertexNormals();
       this.fillingGeometry.computeVertexNormals();
+      for (let k = 0; k < layerCount; k++) {
+        const layer = layers[k];
+        layer.shellGeometry.attributes.position.needsUpdate = true;
+        layer.shellGeometry.computeVertexNormals();
+      }
     }
     /**
      * How much of the shell is still visible solid wax, 0-1 — 1 for a
@@ -32505,31 +32628,45 @@ void main() {
      * "past the same line the shader itself discards at" instead means this
      * reaches 0% at exactly the moment the last visible scrap disappears.
      *
-     * Reads the MERGED holeMask (local breaks + global cell reveal — see that
-     * field's own doc comment), so this now correctly reaches 0% once
-     * everything visible is gone even if a lot of it disappeared via the
-     * global reveal rather than a real local break — it used to only track
-     * local breaks, which left this stuck showing wax "remaining" long after
-     * it had visibly all flaked away, and let clicking an already-visually-
-     * empty spot still register as a break (see _checkBreak's holeMask guard).
+     * Averages, across every vertex, WHAT FRACTION of its own layers are
+     * still intact (not just whether the outermost one is) — for layerCount 1
+     * that's just "is THE layer intact, 0 or 1", identical to the old
+     * single-layer formula. Needs to look past the outermost layer alone now
+     * that each layer opens over a DIFFERENT radius (see
+     * holeRadiusMultiplierForLayer — "겉면이 제일 많이 떨어지고, 안쪽으로
+     * 갈수록 조금씩만"): a break leaves plenty of vertices where the outer
+     * layer has opened but an inner one is still very much visible and
+     * intact right there, so counting "outer open ⟹ 0% left here" made the
+     * displayed % drop far faster than what was actually still visibly on
+     * screen — confirmed directly from a screenshot showing a clearly
+     * still-mostly-intact ball reporting 8% remaining ("아무리 봐도 8%
+     * 남은거같지 않은데"). Each layer's own radius is always ⊇ every layer
+     * further in for the SAME break (see holeRadiusMultiplierForLayer's own
+     * ordering), so "how many of a vertex's layers are intact" is always a
+     * clean 0..layerCount count, never something in between two layers that
+     * doesn't correspond to a real state.
      */
     getRemainingWaxRatio() {
-      let remainingCount = 0;
+      let remainingLayerSum = 0;
       for (let v = 0; v < this.vertexCount; v++) {
-        if (this.holeMask[v] <= 0.5) remainingCount++;
+        for (let k = 0; k < this.layerCount; k++) {
+          if (this.layers[k].holeMask[v] <= 0.5) remainingLayerSum++;
+        }
       }
-      return remainingCount / this.vertexCount;
+      return remainingLayerSum / (this.layerCount * this.vertexCount);
     }
     /**
-     * Buckets this mesh's own shell into a lat/lon grid (see
-     * containmentBinIndex), each cell holding the CURRENT (this frame's,
-     * already-dented) shortest distance from the origin among every shell
-     * vertex whose LIVE position falls in that cell — used by
-     * composite-waxbbu-mesh.js (via buildContainmentFromGrid below) as a
-     * per-direction containment boundary for the wax inside it. Reads the
-     * LIVE surface, not this.radius (the NOMINAL, undeformed one): while the
-     * bubble is actively dented inward at the press point, its real surface
-     * there sits well inside its own nominal radius.
+     * Buckets this mesh's own shell (its OUTERMOST layer — see
+     * this.shellGeometry) into a lat/lon grid (see containmentBinIndex), each
+     * cell holding the CURRENT (this frame's, already-dented) shortest
+     * distance from the origin among every shell vertex whose LIVE position
+     * falls in that cell — used by composite-waxbbu-mesh.js (via
+     * buildContainmentFromGrid below) as a per-direction containment boundary
+     * for the wax inside it. Only ever called for "왁뿌볼" (always
+     * layerCount === 1, so "the outermost layer" is unambiguously the whole
+     * shell). Reads the LIVE surface, not this.radius (the NOMINAL, undeformed
+     * one): while the bubble is actively dented inward at the press point, its
+     * real surface there sits well inside its own nominal radius.
      *
      * Deliberately a GRID over the whole shell, not one single global minimum
      * — an earlier version returned just the shell's overall closest-to-origin
@@ -32601,35 +32738,40 @@ void main() {
       }
       return result;
     }
-    /** LOCAL-only remaining ratio — counts only real, click-driven breaks (_localHoleMask), blind to the global reveal. Exists purely to safely DRIVE globalRevealProgress in _applyGlobalReveal without creating a feedback loop with getRemainingWaxRatio's own (merged) result. */
+    /** LOCAL-only remaining ratio for the outermost (single, in this case) layer — counts only real, click-driven breaks (_localHoleMask), blind to the global reveal. Exists purely to safely DRIVE globalRevealProgress in _applyGlobalReveal without creating a feedback loop with getRemainingWaxRatio's own (merged) result. Only ever called for layerCount === 1 — see _applyGlobalReveal. */
     getLocalRemainingRatio() {
       let remainingCount = 0;
+      const local = this.layers[0]._localHoleMask;
       for (let v = 0; v < this.vertexCount; v++) {
-        if (this._localHoleMask[v] <= 0.5) remainingCount++;
+        if (local[v] <= 0.5) remainingCount++;
       }
       return remainingCount / this.vertexCount;
     }
-    /** Restores a pristine, uncracked wax shape. */
+    /** Restores a pristine, uncracked wax shape — the shared crackDamage plus every layer's own hole state. */
     reset() {
       this.plasticOffset.fill(0);
       this.elasticSnapshot.fill(0);
       this.elasticDecay = 0;
       this._elasticHeld = false;
       this.crackDamage.fill(0);
-      this.holeMask.fill(0);
-      this._localHoleMask.fill(0);
+      for (const layer of this.layers) {
+        layer.holeMask.fill(0);
+        if (layer._localHoleMask !== layer.holeMask) layer._localHoleMask.fill(0);
+      }
       this.globalRevealProgress = 0;
       this.hasBrokenOnce = false;
       this._rebuildPositions();
-      this.shellGeometry.attributes.crackDamage.needsUpdate = true;
-      this.shellGeometry.attributes.holeMask.needsUpdate = true;
+      for (const layer of this.layers) {
+        layer.shellGeometry.attributes.crackDamage.needsUpdate = true;
+        layer.shellGeometry.attributes.holeMask.needsUpdate = true;
+      }
       this.coreGeometry.attributes.crackDamage.needsUpdate = true;
       this.coreGeometry.attributes.holeMask.needsUpdate = true;
     }
     dispose() {
       this.coreGeometry.dispose();
-      this.shellGeometry.dispose();
       this.fillingGeometry.dispose();
+      for (const layer of this.layers) layer.shellGeometry.dispose();
     }
   };
 
@@ -32644,6 +32786,7 @@ void main() {
         CONTAINMENT_MARGIN
       );
       this.mesh = shellDeform.mesh;
+      this.shellMeshes = shellDeform.shellMeshes;
       this.coreMesh = coreDeform.coreMesh;
       this.fillingMesh = coreDeform.fillingMesh;
       this.radius = shellDeform.radius;
@@ -33265,8 +33408,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     coreMaterial2.userData.waxUniforms.innerCrackVisible.value = look.innerCrackVisible ?? 0;
     coreMaterial2.side = look.side ?? DoubleSide;
   }
-  function setShellLook(shellMaterial2, waxType) {
-    const look = SHELL_LOOK[waxType] ?? SHELL_LOOK.basic;
+  function applyShellLook(shellMaterial2, look) {
     const uniforms = shellMaterial2.userData.waxUniforms;
     uniforms.waxColor.value.set(look.waxColor);
     uniforms.hazeAmount.value = look.hazeAmount;
@@ -33277,6 +33419,26 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     shellMaterial2.clearcoatRoughness = look.clearcoatRoughness;
     shellMaterial2.opacity = look.opacity ?? 1;
     shellMaterial2.side = look.side ?? DoubleSide;
+  }
+  function setShellLook(shellMaterial2, waxType) {
+    applyShellLook(shellMaterial2, SHELL_LOOK[waxType] ?? SHELL_LOOK.basic);
+  }
+  var CROISSANT_OUTER_LOOK = { waxColor: 11035423, waxRoughnessBase: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.2 };
+  var CROISSANT_INNER_LOOK = { waxColor: 16248016, waxRoughnessBase: 0.6, clearcoat: 0.15, clearcoatRoughness: 0.5 };
+  var croissantColorScratch = new Color();
+  var croissantOuterColor = new Color(CROISSANT_OUTER_LOOK.waxColor);
+  var croissantInnerColor = new Color(CROISSANT_INNER_LOOK.waxColor);
+  function setCroissantLayerLook(shellMaterial2, layerIndex, layerCount) {
+    const t = layerCount <= 1 ? 0 : layerIndex / (layerCount - 1);
+    croissantColorScratch.copy(croissantOuterColor).lerp(croissantInnerColor, t);
+    applyShellLook(shellMaterial2, {
+      waxColor: croissantColorScratch.getHex(),
+      hazeAmount: 0,
+      waxRoughnessBase: MathUtils.lerp(CROISSANT_OUTER_LOOK.waxRoughnessBase, CROISSANT_INNER_LOOK.waxRoughnessBase, t),
+      clearcoat: MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoat, CROISSANT_INNER_LOOK.clearcoat, t),
+      clearcoatRoughness: MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoatRoughness, CROISSANT_INNER_LOOK.clearcoatRoughness, t),
+      sparkleAmount: 0
+    });
   }
   function setShellCellReveal(shellMaterial2, globalRevealProgress) {
     shellMaterial2.userData.waxUniforms.shellCellRevealProgress.value = globalRevealProgress;
@@ -33415,14 +33577,14 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       if (fragmentSpawn) {
         active.soundPlayed = true;
         this.onPoke?.(targetStrength, fragmentSpawn.isFirstBreak);
-        this.onFragmentPop?.(fragmentSpawn.point, active.normal, fragmentSpawn.radius);
+        this.onFragmentPop?.(fragmentSpawn.point, active.normal, fragmentSpawn.radius, fragmentSpawn.colors);
       }
     }
   };
 
   // src/fragments.js
   var GRAVITY = -9.8;
-  var MAX_FRAGMENTS = 24;
+  var MAX_FRAGMENTS = 40;
   var LAND_LINGER_SECONDS = 1;
   var FADE_SECONDS = 0.5;
   function buildShardGeometry(size) {
@@ -33614,6 +33776,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec] (5).mp3",
     "sounds/morganfilm-cracking-stones-calm-168153_[cut_1sec].mp3"
   ];
+  var WAXBBU_CRACK_POOL_ALL = [...WAXBBU_CRACK_POOL_ABOVE_40, ...WAXBBU_CRACK_POOL_AT_OR_BELOW_40];
   var FIRST_ATTEMPT_CRACK_SOUND = "sounds/freesound_community-bamboocracking-78192_[cut_1sec].mp3";
   var templates = {};
   var masterVolume = 1;
@@ -33632,6 +33795,14 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     clone.play().catch(() => {
     });
   }
+  function playDistinctRandom(pool, count, strength) {
+    const indices = pool.map((_, i) => i);
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    for (const idx of indices.slice(0, Math.min(count, pool.length))) playOne(pool[idx], strength);
+  }
   function setMasterVolume(volume) {
     masterVolume = Math.min(1, Math.max(0, volume));
   }
@@ -33639,10 +33810,18 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     if (masterVolume <= 0) return;
     playOne(FIRST_ATTEMPT_CRACK_SOUND, 1);
   }
-  function playMaterialSound(materialMode, waxType, strength = 1, isFirstBreak = false) {
+  function playMaterialSound(materialMode, waxType, strength = 1, isFirstBreak = false, isLow = false) {
     if (masterVolume <= 0) return;
     const [firstBreakSound, pool] = materialMode === "clay" ? [CLAY_FIRST_BREAK_SOUND, CLAY_SOUND_POOL] : [SLIME_FIRST_BREAK_SOUND, SLIME_SOUND_POOL];
     playOne(isFirstBreak ? firstBreakSound : pool[Math.floor(Math.random() * pool.length)], strength);
+    if (waxType === "croissant") {
+      if (isLow) {
+        playDistinctRandom(WAXBBU_CRACK_POOL_AT_OR_BELOW_40, 2, strength);
+      } else {
+        playDistinctRandom(WAXBBU_CRACK_POOL_ALL, 3, strength);
+      }
+      return;
+    }
     const waxTypeSound = WAX_TYPE_SOUND[waxType];
     if (waxTypeSound) {
       const src = isFirstBreak ? waxTypeSound.firstBreak : waxTypeSound.pool[Math.floor(Math.random() * waxTypeSound.pool.length)];
@@ -33805,6 +33984,12 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   var coreMaterial = createCoreMaterial();
   var shellMaterial = createShellMaterial();
   var fillingMaterial = createFillingMaterial();
+  var CROISSANT_LAYER_COUNT = 5;
+  var croissantShellMaterials = Array.from({ length: CROISSANT_LAYER_COUNT }, (_, layerIndex) => {
+    const material = createShellMaterial();
+    setCroissantLayerLook(material, layerIndex, CROISSANT_LAYER_COUNT);
+    return material;
+  });
   var fragments = new FragmentSystem(scene, groundY);
   var currentMaterialMode = "clay";
   var currentWaxType = "basic";
@@ -33815,11 +34000,12 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   var WAXBBU_BUBBLE_RADIUS_SCALE = 1.15;
   function buildDeformable(geometry, isCustom) {
     if (currentMaterialMode === "waxbbu" && isCustom) {
-      const shellDeform = new DeformableMesh(buildSphereGeometry(WAXBBU_BUBBLE_RADIUS_SCALE), coreMaterial, shellMaterial, fillingMaterial);
-      const coreDeform = new DeformableMesh(geometry, coreMaterial, shellMaterial, fillingMaterial);
+      const shellDeform = new DeformableMesh(buildSphereGeometry(WAXBBU_BUBBLE_RADIUS_SCALE), coreMaterial, [shellMaterial], fillingMaterial);
+      const coreDeform = new DeformableMesh(geometry, coreMaterial, [shellMaterial], fillingMaterial);
       return new CompositeWaxbbuMesh(shellDeform, coreDeform);
     }
-    const deform = new DeformableMesh(geometry, coreMaterial, shellMaterial, fillingMaterial);
+    const shellMaterials = currentMaterialMode !== "waxbbu" && currentWaxType === "croissant" ? croissantShellMaterials : [shellMaterial];
+    const deform = new DeformableMesh(geometry, coreMaterial, shellMaterials, fillingMaterial);
     deform.setMaterialMode(currentMaterialMode);
     return deform;
   }
@@ -33836,21 +34022,26 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     setCellReveal(coreMaterial, fillingMaterial, deformable.globalRevealProgress);
     setShellCellReveal(shellMaterial, deformable.globalRevealProgress);
   }
+  function syncFillingVisibility() {
+    deformable.fillingMesh.visible = currentMaterialMode === "waxbbu";
+  }
   var deformable = buildDeformable(buildSphereGeometry(), false);
+  syncFillingVisibility();
   setCoreMaterialMode(coreMaterial, currentMaterialMode);
   setShellLook(shellMaterial, "basic");
   setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
   scene.add(deformable.coreMesh);
-  scene.add(deformable.mesh);
+  for (const shellMesh of deformable.shellMeshes) scene.add(shellMesh);
   scene.add(deformable.fillingMesh);
   function rebuildShape(geometry, isCustom) {
     scene.remove(deformable.coreMesh);
-    scene.remove(deformable.mesh);
+    for (const shellMesh of deformable.shellMeshes) scene.remove(shellMesh);
     scene.remove(deformable.fillingMesh);
     deformable.dispose();
     deformable = buildDeformable(geometry, isCustom);
+    syncFillingVisibility();
     scene.add(deformable.coreMesh);
-    scene.add(deformable.mesh);
+    for (const shellMesh of deformable.shellMeshes) scene.add(shellMesh);
     scene.add(deformable.fillingMesh);
     setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
     startNewWaxTracking();
@@ -33860,6 +34051,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   var shortTapCount = 0;
   var COMPLETION_REMAINING_THRESHOLD = 0.1;
   var WAXBBU_LOW_SOUND_THRESHOLD = 0.4;
+  var CROISSANT_LOW_SOUND_THRESHOLD = 0.15;
   var pointerInteraction = new PointerInteraction({
     renderer,
     camera,
@@ -33874,11 +34066,12 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
         playWaxbbuSound(tier, strength);
         return;
       }
-      playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak);
+      const isCroissantLow = currentWaxType === "croissant" && !isFirstBreak && deformable.getRemainingWaxRatio() <= CROISSANT_LOW_SOUND_THRESHOLD;
+      playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak, isCroissantLow);
     },
-    onFragmentPop: (point, normal, radius) => {
+    onFragmentPop: (point, normal, radius, colors) => {
       if (currentMaterialMode === "waxbbu") return;
-      fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
+      for (const color of colors) fragments.spawn(point, normal, color, radius);
     },
     // x is only ever passed as null to mean "hide/reset" (release, drag, or the
     // break itself) — see pointer-interaction.js. The screen coordinates
@@ -33914,19 +34107,25 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   }
   var { initialColor } = initUI({
     onWaxTypeChange: (waxType) => {
+      const layeredChanged = waxType === "croissant" !== (currentWaxType === "croissant");
       currentWaxType = waxType;
       setShellLook(shellMaterial, waxType);
+      if (layeredChanged) {
+        rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+      }
       requestRender();
     },
     onMaterialChange: (mode) => {
       const modeChanged = mode !== currentMaterialMode;
+      const structureChanged = modeChanged && (isCustomShape || currentWaxType === "croissant");
       currentMaterialMode = mode;
       setCoreMaterialMode(coreMaterial, mode);
       setShellLook(shellMaterial, mode === "waxbbu" ? "waxbbuShell" : currentWaxType);
-      if (modeChanged && isCustomShape) {
-        rebuildShape(buildImageGeometry(currentSilhouette), true);
+      if (structureChanged) {
+        rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
       } else {
         deformable.setMaterialMode(mode);
+        syncFillingVisibility();
         if (modeChanged) {
           deformable.reset();
           fragments.reset();
@@ -33994,7 +34193,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       if (currentMaterialMode === "waxbbu") {
         setFillingMix(fillingMaterial, currentColorHex, usingPhotoTexture ? 0 : 1 - remainingRatio);
         setCellReveal(coreMaterial, fillingMaterial, deformable.globalRevealProgress);
-      } else {
+      } else if (deformable.layerCount === 1) {
         setShellCellReveal(shellMaterial, deformable.globalRevealProgress);
       }
       if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {

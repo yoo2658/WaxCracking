@@ -131,7 +131,7 @@ export const FIRST_BREAK_HOLD_SECONDS = 1.5; // a pristine, never-yet-broken wax
 const FIRST_BREAK_CRACK_SPREAD_MULTIPLIER = 1.25; // the payoff for that first sustained press is a wide crack network radiating outward — the actual hole/fragment stay normal-sized so the wax doesn't look like it vanished over a huge area. Halved from 2.5 per feedback that the crack spread felt too wide.
 const REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER = 0.9; // every later break also gets a modest crack-spread halo around its hole — without this, a regular break only had whatever crackDamage the poke() hits themselves happened to leave nearby (a much smaller radius), so the area around a fresh hole looked almost uncracked.
 
-const SHELL_THICKNESS_RATIO = 0.035; // wax coating thickness, as a fraction of thicknessAxis (was 0.07 of radius — same halving as MAX_PLASTIC_DISPLACEMENT_RATIO above)
+const SHELL_THICKNESS_RATIO = 0.035; // ONE LAYER's wax coating thickness, as a fraction of thicknessAxis (was 0.07 of radius — same halving as MAX_PLASTIC_DISPLACEMENT_RATIO above). A shape with more than one shell layer (크루아상 — see layerCount) stacks this many times over, so its TOTAL coating reads noticeably thicker without this per-layer number itself changing.
 // How far inside the core's own surface the innermost "filling" mesh sits
 // (see fillingMesh) — only ever matters for "왁뿌볼", whose core/wax layer
 // can genuinely discard a hole open: without something solid just behind it,
@@ -197,38 +197,157 @@ const BULGE_PEAK_RATIO = 1.0;
 const BULGE_OUTER_RATIO = 1.6;
 const BULGE_STRENGTH = 0.5;
 
+// How much tougher a multi-layer wax (크루아상 — see layerCount) is to break
+// at any one spot than a normal single-layer one — NOT tied to layerCount
+// itself (an earlier version used 1/layerCount directly, making a 5-layer
+// 크루아상 a full 5x tougher, which read as far too much effort per break —
+// "크루아상 왁스 부수는 힘이 조금 덜 들면 좋겠어... 지금 손가락이 너무
+// 아파"). Requested range was "일반 왁스의 1~2배" (1-2x a normal wax); 1.5
+// sits in the middle. Only ever read for layerCount > 1 — see
+// crackRateMultiplier below — so this number alone controls toughness,
+// independent of however many layers 크루아상 happens to have.
+const MULTI_LAYER_TOUGHNESS_MULTIPLIER = 1.5;
+
+// How many fragments a single broken LAYER contributes when every layer
+// pops at once (see _checkBreak) — weighted toward the outermost layer
+// ("겉 왁스가 제일 많이"), tapering down toward the innermost one, right
+// against the core ("가장 중심에 가까운 왁스는 조금") — a real multi-layer
+// wax's thin, brittle outer crust shatters into far more pieces than its
+// softer, better-protected inner coats. Always exactly 1 for layerCount 1
+// (every non-크루아상 type) — see fragmentCountForLayer — unchanged from
+// before this existed.
+const LAYER_FRAGMENT_COUNT_OUTERMOST = 6;
+const LAYER_FRAGMENT_COUNT_INNERMOST = 1;
+
+/** See LAYER_FRAGMENT_COUNT_OUTERMOST/INNERMOST's own comment — linearly tapers between them across the layer stack, index 0 = outermost. */
+function fragmentCountForLayer(layerIndex, layerCount) {
+  if (layerCount <= 1) return 1;
+  const t = layerIndex / (layerCount - 1); // 0 at outermost, 1 at innermost
+  return Math.round(THREE.MathUtils.lerp(LAYER_FRAGMENT_COUNT_OUTERMOST, LAYER_FRAGMENT_COUNT_INNERMOST, t));
+}
+
+// How much WIDER a single break's hole is on the outermost layer than on
+// the innermost one ("겉면이 제일 많이 떨어지고, 안쪽으로 갈수록 조금씩만
+// 떨어진다") — a real layered wax's thin, brittle crust chips away over a
+// noticeably bigger area per hit than its softer inner coats do at that
+// same spot, so over many breaks the outer coat ends up mostly gone while
+// the inner ones still cover more of what's left. Reuses the exact same
+// linear taper shape as fragmentCountForLayer, just for a different
+// quantity. 1 (no change) for layerCount 1 — every non-크루아상 type.
+const LAYER_HOLE_RADIUS_MULTIPLIER_OUTERMOST = 1.4;
+const LAYER_HOLE_RADIUS_MULTIPLIER_INNERMOST = 0.65;
+
+function holeRadiusMultiplierForLayer(layerIndex, layerCount) {
+  if (layerCount <= 1) return 1;
+  const t = layerIndex / (layerCount - 1);
+  return THREE.MathUtils.lerp(LAYER_HOLE_RADIUS_MULTIPLIER_OUTERMOST, LAYER_HOLE_RADIUS_MULTIPLIER_INNERMOST, t);
+}
+
+/**
+ * Same as holeRadiusMultiplierForLayer, except once remainingRatio drops
+ * below CLEANUP_REMAINING_THRESHOLD, blends the result back toward the
+ * OUTERMOST layer's own (widest) multiplier as remainingRatio nears 0 — see
+ * that constant's own comment for why. remainingRatio isn't looked up in
+ * here (the caller already needs it for other decisions too — see
+ * _checkBreak — so it's just passed in to avoid computing it twice).
+ */
+function effectiveHoleRadiusMultiplierForLayer(layerIndex, layerCount, remainingRatio) {
+  const base = holeRadiusMultiplierForLayer(layerIndex, layerCount);
+  if (layerCount <= 1 || remainingRatio >= CLEANUP_REMAINING_THRESHOLD) return base;
+  const cleanupT = 1 - remainingRatio / CLEANUP_REMAINING_THRESHOLD; // 0 at the threshold, 1 once remaining hits 0
+  return THREE.MathUtils.lerp(base, LAYER_HOLE_RADIUS_MULTIPLIER_OUTERMOST, cleanupT);
+}
+
+// How jagged/irregular a freshly-opened hole's edge is, as a fraction of its
+// own radius — 0 would be a perfectly smooth circular cutout (the shape
+// every break used to come out as, regardless of where it landed — "뚫린
+// 모양이 똑같다"). A fresh random seed each break (see _boostFieldAt) means
+// no two holes end up looking the same even at the same influenceRadius.
+// Only applied to hole edges, not crack-line spread (_boostCrackAt) — the
+// crack network already reads as organic via the shader's own Voronoi
+// pattern regardless of crackDamage's own (still smooth) boundary shape.
+const HOLE_EDGE_JITTER = 0.35;
+
+// 크루아상 only (a no-op for layerCount 1 — see _checkBreak). Once hardly
+// any wax is left, a break stops popping the usual big multi-layer burst of
+// debris (fragmentCountForLayer's 6/4/1 spread) and instead drops just ONE
+// fragment, in the INNERMOST layer's own color — "그 때부턴 제일 안쪽 면
+// 색깔의 파편만 하나씩". Kept in lockstep with main.js's own
+// CROISSANT_LOW_SOUND_THRESHOLD (also 0.15) so the sound and the visuals
+// both calm down together once there's plausibly almost nothing left to be
+// cracking off in big colorful chunks.
+const LOW_FRAGMENT_REMAINING_THRESHOLD = 0.15;
+
+// 크루아상 only (a no-op for layerCount 1). The outermost layer's hole
+// always opens far WIDER than the innermost one's (see
+// holeRadiusMultiplierForLayer — "겉면이 제일 많이 떨어지고, 안쪽으로 갈수록
+// 조금씩만") — great for how a single break looks, but across MANY separate
+// breaks scattered/re-pressed over a wide area, it also means the
+// innermost (palest) layer's own narrow radius can end up never quite
+// overlapping between two nearby-but-not-identical presses, leaving a
+// small, disproportionately pale sliver of it stranded there indefinitely
+// — confirmed directly: "남은 왁스 0%"인데도 화면에는 계속 흰 조각이 남아
+//있었음, from multiple camera angles, ruling out a falling fragment. Below
+// this remaining-ratio threshold, every layer's own radius progressively
+// widens BACK toward the outermost layer's own (widest) value as remaining
+// approaches 0 — closing that gap exactly when it matters (finishing off
+// the last little bit) while leaving the full terraced-radius effect
+// completely untouched everywhere above this threshold, where remaining
+// presses still have plenty of nearby fresh material to reach normally.
+const CLEANUP_REMAINING_THRESHOLD = 0.2;
+
 /**
  * Owns two welded, indexed, vertex-corresponding geometries built from the
  * same base shape:
- *  - the CORE (slime/clay/왁뿌볼): sits inset beneath the surface by
- *    shellThickness, carries the actual plastic (permanent, clay) and
- *    elastic (transient, slime and 왁뿌볼 — see _isElastic) displacement, and
- *    is textured with the user's photo/color in wax-material.js's core
- *    material. It also reads crackDamage (shared with the shell's own copy,
- *    see the constructor), but only 왁뿌볼 actually acts on it (blending
- *    toward a slime tint as damage rises) — for clay/slime that read is a
- *    harmless no-op, so "core has no idea cracks exist" still holds for them.
- *  - the SHELL (wax): every frame, rebuilt as the core's position plus a
- *    constant shellThickness along the outward direction (so it can never be
- *    poked through by a large dent or bulge — a thin coating stays exactly
- *    that thin everywhere), collapsing to 0 right where a hole has broken
- *    through. It renders the crack/grout pattern and discards its own
- *    fragments there (see shaders/wax-crack-chunks.js), so what shows through
- *    a hole is the real core mesh — an opaque, depth-correct surface —
- *    rather than a blended texture on the same skin.
+ *  - the CORE (slime/clay/왁뿌볼): sits inset beneath the surface by the
+ *    FULL stacked shell thickness (every layer's own thickness added
+ *    together, see layerCount below), carries the actual plastic (permanent,
+ *    clay) and elastic (transient, slime and 왁뿌볼 — see _isElastic)
+ *    displacement, and is textured with the user's photo/color in
+ *    wax-material.js's core material. It also reads crackDamage/holeMask
+ *    (shared with the outermost shell layer's own copy, see the
+ *    constructor), but only 왁뿌볼 actually acts on it (blending toward a
+ *    slime tint as damage rises) — for every other mode that read is a
+ *    harmless no-op.
+ *  - the SHELL (wax): one or more stacked LAYERS (see layerCount) — every
+ *    existing wax type uses exactly one, which behaves identically to the
+ *    single shell this class used to have outright; 크루아상 is the only
+ *    caller that passes more than one. Every layer, every frame, is rebuilt
+ *    as the core's position plus a constant per-layer gap along the outward
+ *    direction, stacked innermost-out (see _rebuildPositions) — so a poke
+ *    can never punch through the coating by denting/bulging past it, only by
+ *    an actual break (see below). Each layer renders its own crack/grout
+ *    pattern and discards its own fragments (see shaders/wax-crack-chunks.js),
+ *    so what shows through a hole is always a real, depth-correct surface
+ *    (the core) rather than a blended texture on the same skin.
  *
- * crackDamage (cosmetic crack growth, 0-1 per vertex) and holeMask (a spot
- * where a chunk has actually broken off and fallen) live on the shell only.
- * A break is triggered per-poke by _checkBreak: normally once crackDamage at
- * the poked spot crosses BREAK_DAMAGE_THRESHOLD (roughly two full-strength
- * pokes there, whether from separate taps or one continuous hold — see
- * poke()), but a wax that has never broken at all needs one single
- * sustained FIRST_BREAK_HOLD_SECONDS-long press before its first break,
- * which is rewarded with a much wider crack burst than usual (the actual
- * hole/fragment size is unchanged) — it still visibly dents and cracks a
- * little the whole time it's building up to that, same as any later press.
+ * crackDamage (cosmetic crack growth, 0-1 per vertex) is shared, ONE field
+ * for the whole stack — the same as it always was before this class
+ * supported more than one layer. holeMask lives per layer, but ALL layers
+ * open together at the exact same spot in the exact same call (see
+ * _checkBreak) — real multi-layer wax cracks a chunk spanning several coats
+ * AT ONCE, not one thin layer at a time ("한 번에 여러 겹이 와다닥 깨져"),
+ * confirmed against real 100겹 버터왁스크런치 reference footage: a break
+ * there pops several differently-colored layers of debris in one single
+ * burst, not a slow one-at-a-time peel. A break is triggered per-poke by
+ * _checkBreak: once crackDamage at the poked spot crosses the SAME
+ * BREAK_DAMAGE_THRESHOLD as ever (never scaled past crackDamage's own 0..1
+ * ceiling — see crackRateMultiplier), it pops every layer AND a fragment per
+ * layer, all at once. A 크루아상 spot still takes somewhat more hits than a
+ * single-layer wax would ("more force required to break") to GET there, via
+ * crackRateMultiplier slowing how fast each hit's damage accumulates
+ * instead — by MULTI_LAYER_TOUGHNESS_MULTIPLIER (currently 1.5x), not by how
+ * many layers it happens to have (an earlier version scaled by 1/layerCount
+ * directly, making a 5-layer 크루아상 a full 5x tougher — far more effort
+ * than intended, decoupled from layer count on request). A wax that has
+ * never broken AT ALL yet additionally
+ * needs one single sustained FIRST_BREAK_HOLD_SECONDS-long press before its
+ * first break, rewarded with a much wider crack burst than
+ * usual (the actual hole/fragment size is unchanged) — it still visibly
+ * dents and cracks a little the whole time it's building up to that, same
+ * as any later press.
  *
- * Both meshes are kept at an identity transform (no rotation/translation/
+ * Every mesh is kept at an identity transform (no rotation/translation/
  * scale) for their whole lifetime, so raycast hit points in world space can
  * be used directly as local/object space — no matrix conversion needed. View
  * rotation is handled separately by OrbitControls in scene.js.
@@ -261,9 +380,27 @@ export class DeformableMesh {
    * that patch's own (much larger) radius as its limit, regardless of how
    * dented some unrelated other spot on the shell currently is.
    */
-  constructor(geometry, coreMaterial, shellMaterial, fillingMaterial) {
+  constructor(geometry, coreMaterial, shellMaterials, fillingMaterial) {
     this.materialMode = 'clay'; // 'clay' | 'slime' | 'waxbbu' (see _isElastic below)
     this.containmentRadiusPerVertex = null;
+    // How many wax coats are stacked on top of the core — 1 for every
+    // existing wax type (identical to the old single-shell behavior), 3 for
+    // 크루아상 (see main.js's buildDeformable). shellMaterials is always an
+    // array, one entry per layer, index 0 = OUTERMOST (struck first).
+    this.layerCount = shellMaterials.length;
+    // See class doc comment — a multi-layer spot should take somewhat more
+    // HITS before it lets go, but crackDamage itself is (and must stay)
+    // clamped to 0..1 per vertex — the shader's own crackSpread visual reads
+    // it on that same 0..1 assumption, and BREAK_DAMAGE_THRESHOLD needs to
+    // stay reachable at all (scaling the THRESHOLD up past 1 instead of
+    // this, tried first, made it literally unreachable — crackDamage can
+    // never exceed 1, so a threshold of e.g. 1.5 for 3 layers never fires,
+    // ever, after the very first break). Scaling the ACCUMULATION RATE down
+    // instead (see poke()) gets the same toughness within that same 0..1
+    // range — by MULTI_LAYER_TOUGHNESS_MULTIPLIER, not by layerCount itself
+    // (see that constant's own comment on why). 1 for layerCount 1,
+    // unchanged from before layers existed.
+    this.crackRateMultiplier = this.layerCount > 1 ? 1 / MULTI_LAYER_TOUGHNESS_MULTIPLIER : 1;
 
     geometry.computeBoundingSphere();
     this.radius = geometry.boundingSphere.radius;
@@ -314,38 +451,40 @@ export class DeformableMesh {
     // square matching `radius` (the old, single-scalar behavior) if a
     // geometry doesn't provide one.
     this.imageFrameHalfExtent = geometry.userData.imageFrameHalfExtent ?? { x: this.radius, y: this.radius };
-    this.shellThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
+    // ONE layer's own thickness — see SHELL_THICKNESS_RATIO's own comment on
+    // why this number itself doesn't change with layerCount.
+    const perLayerThickness = thicknessAxis * SHELL_THICKNESS_RATIO;
     this.fillingInset = thicknessAxis * FILLING_INSET_RATIO;
 
-    const shellGeometry = geometry; // outer silhouette, unchanged from the built shape
-    const coreGeometry = geometry.clone(); // deep-copies attributes/index — safe to mutate independently
-    const fillingGeometry = geometry.clone(); // a third, further-inset copy — see fillingInset above
+    const baseGeometry = geometry; // outer (outermost-layer) silhouette, unchanged from the built shape
+    const basePositionAttr = baseGeometry.attributes.position;
+    this.vertexCount = basePositionAttr.count;
+    const baseRestPosition = basePositionAttr.array;
 
-    const shellPositionAttr = shellGeometry.attributes.position;
-    this.vertexCount = shellPositionAttr.count;
-    const shellRestPosition = shellPositionAttr.array;
-
-    // Per-vertex ceiling on shellThickness (set by geometries.js, sampling
-    // the silhouette's own local-thickness field directly at each vertex's
-    // position — see geometries.js's computeShellClearance) — small at a
-    // silhouette's narrow/concave spots (between two ears, an armpit, a thin
-    // hair spike, ...), large anywhere wide open, including the whole
-    // sphere. Without this, the shell's constant outward offset could push
-    // both sides of a narrow neck past each other, leaving a gap right there
-    // that exposes the core (and whatever photo/color it's showing) —
-    // reported directly as "복잡한 경계면은 왁스가 감싸지지 않고 속 재질이
-    // 보이는" (see 2026-08-05/14_Plan.md). Precomputed once here (not
-    // re-derived every frame in _rebuildPositions()) since shellClearance
-    // itself never changes after the shape is built. No curvature-based
-    // gating needed — an earlier version of this only trusted shellClearance
-    // near the rim (gating by curvatureSafety) because shellClearance itself
-    // was unreliable everywhere else; now that it's measured directly per
-    // vertex, it's already correctly large in the deep-interior flat-cap
-    // case on its own (see 2026-08-05/17_Plan.md).
-    const shellClearance = geometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
+    // Per-vertex ceiling on the shell's TOTAL thickness (every layer added
+    // together), set by geometries.js sampling the silhouette's own
+    // local-thickness field directly at each vertex's position (see
+    // geometries.js's computeShellClearance) — small at a silhouette's
+    // narrow/concave spots (between two ears, an armpit, a thin hair
+    // spike, ...), large anywhere wide open, including the whole sphere.
+    // Without this, the shell's constant outward offset could push both
+    // sides of a narrow neck past each other, leaving a gap right there that
+    // exposes the core (and whatever photo/color it's showing) — reported
+    // directly as "복잡한 경계면은 왁스가 감싸지지 않고 속 재질이 보이는"
+    // (see 2026-08-05/14_Plan.md). Precomputed once here (not re-derived
+    // every frame in _rebuildPositions()) since shellClearance itself never
+    // changes after the shape is built. Clamped on the TOTAL stacked
+    // thickness, not any one layer's own share of it — otherwise a narrow
+    // custom shape could let a multi-layer 크루아상's OUTERMOST layer cross
+    // the opposite side even though each individual layer looked safely
+    // thin on its own; every layer then gets an even share of whatever total
+    // actually fits (for layerCount 1, this is identical to before).
+    const shellClearance = baseGeometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
     this.localShellThickness = new Float32Array(this.vertexCount);
     for (let v = 0; v < this.vertexCount; v++) {
-      this.localShellThickness[v] = Math.min(this.shellThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
+      const totalThickness = perLayerThickness * this.layerCount;
+      const clampedTotal = Math.min(totalThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
+      this.localShellThickness[v] = clampedTotal / this.layerCount;
     }
 
     // The shape's real vertex normals (geometries.js runs every shape through
@@ -359,16 +498,16 @@ export class DeformableMesh {
     // and the poke's push direction drift away from "actually along the
     // surface" (see 2026-08-05/02_Plan.md). No change for a sphere: its real
     // vertex normals already point almost exactly in the origin direction.
-    const shellNormalAttr = shellGeometry.attributes.normal;
+    const baseNormalAttr = baseGeometry.attributes.normal;
     this.restNormal = new Float32Array(this.vertexCount * 3);
-    if (shellNormalAttr) {
-      this.restNormal.set(shellNormalAttr.array);
+    if (baseNormalAttr) {
+      this.restNormal.set(baseNormalAttr.array);
     } else {
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const x = shellRestPosition[i3];
-        const y = shellRestPosition[i3 + 1];
-        const z = shellRestPosition[i3 + 2];
+        const x = baseRestPosition[i3];
+        const y = baseRestPosition[i3 + 1];
+        const z = baseRestPosition[i3 + 2];
         const len = Math.sqrt(x * x + y * y + z * z) || 1;
         this.restNormal[i3] = x / len;
         this.restNormal[i3 + 1] = y / len;
@@ -376,14 +515,21 @@ export class DeformableMesh {
       }
     }
 
+    // The CORE's own rest surface — inset from the base (outermost layer's)
+    // silhouette by the FULL stacked shell thickness (every layer's own
+    // localShellThickness added together), so the outermost layer's own rest
+    // surface lands exactly ON the base silhouette regardless of layerCount
+    // — for layerCount 1 this is the exact same single subtraction as
+    // before this class supported more than one layer.
     this.restPosition = new Float32Array(this.vertexCount * 3);
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
-      const t = this.localShellThickness[v];
-      this.restPosition[i3] = shellRestPosition[i3] - this.restNormal[i3] * t;
-      this.restPosition[i3 + 1] = shellRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
-      this.restPosition[i3 + 2] = shellRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
+      const t = this.localShellThickness[v] * this.layerCount;
+      this.restPosition[i3] = baseRestPosition[i3] - this.restNormal[i3] * t;
+      this.restPosition[i3 + 1] = baseRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
+      this.restPosition[i3 + 2] = baseRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
     }
+    const coreGeometry = baseGeometry.clone(); // deep-copies attributes/index — safe to mutate independently
     coreGeometry.attributes.position.array.set(this.restPosition);
     coreGeometry.attributes.position.needsUpdate = true;
     coreGeometry.computeVertexNormals();
@@ -395,20 +541,28 @@ export class DeformableMesh {
     // lifetime avoids any flicker from a vertex nominally switching cells
     // mid-deformation). See getRemainingWaxRatio's own doc comment for how
     // this drives the global reveal without creating a feedback loop.
-    this.cellRevealThreshold = new Float32Array(this.vertexCount);
-    for (let v = 0; v < this.vertexCount; v++) {
-      const i3 = v * 3;
-      const cellId = waxVoronoiCellId(
-        this.restPosition[i3] * CELL_REVEAL_FREQUENCY,
-        this.restPosition[i3 + 1] * CELL_REVEAL_FREQUENCY,
-        this.restPosition[i3 + 2] * CELL_REVEAL_FREQUENCY,
-      );
-      this.cellRevealThreshold[v] = waxHash3(cellId[0], cellId[1], cellId[2])[1];
+    // Only meaningful (and only ever read) by _applyGlobalReveal, which is
+    // itself only ever invoked for the single-layer case — 크루아상 (layer
+    // Count > 1) deliberately skips the whole global-reveal mosaic effect in
+    // favor of "때린 자리만 겹겹이 뚫리는" (see class doc comment), so skip
+    // the work computing this there too.
+    if (this.layerCount === 1) {
+      this.cellRevealThreshold = new Float32Array(this.vertexCount);
+      for (let v = 0; v < this.vertexCount; v++) {
+        const i3 = v * 3;
+        const cellId = waxVoronoiCellId(
+          this.restPosition[i3] * CELL_REVEAL_FREQUENCY,
+          this.restPosition[i3 + 1] * CELL_REVEAL_FREQUENCY,
+          this.restPosition[i3 + 2] * CELL_REVEAL_FREQUENCY,
+        );
+        this.cellRevealThreshold[v] = waxHash3(cellId[0], cellId[1], cellId[2])[1];
+      }
     }
     this.globalRevealProgress = 0;
 
     // Initial rest pose only — _rebuildPositions() recomputes this live every
     // frame from restPosition/restNormal directly, same as it does for shell.
+    const fillingGeometry = baseGeometry.clone(); // a third, further-inset copy — see fillingInset above
     const fillingRestPosition = new Float32Array(this.vertexCount * 3);
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
@@ -425,45 +579,98 @@ export class DeformableMesh {
     this.elasticDecay = 0;
     this._elasticHeld = false;
 
+    // crackDamage is ONE shared field for the whole stack (see class doc
+    // comment on why — layers open together, not one at a time, so there's
+    // no per-layer damage to track separately). Exposed as the SAME
+    // BufferAttribute array on every layer's geometry — harmless for the
+    // inner layers, which are never actually visible pre-break anyway (the
+    // outermost one always fully occludes them until the moment they're all
+    // revealed together).
     const crackDamage = new Float32Array(this.vertexCount);
-    shellGeometry.setAttribute('crackDamage', new THREE.BufferAttribute(crackDamage, 1));
-    // Both crackDamage and holeMask are also exposed on the CORE geometry
-    // below, backed by these SAME typed arrays — writes in poke()/
-    // _boostFieldAt update both attributes' values for free, but each
+    this.crackDamage = crackDamage;
+
+    // The shell layer stack — see class doc comment on the cumulative gap
+    // chain (_rebuildPositions). Index 0 = outermost (struck first), the
+    // last index = innermost (right against the core). Every existing wax
+    // type passes exactly one shellMaterial (this loop then runs once, with
+    // a result identical to the old single-shell setup) — 크루아상 is the
+    // only caller that passes more than one (see main.js's buildDeformable).
+    this.layers = [];
+    for (let k = 0; k < this.layerCount; k++) {
+      const layerGeometry = baseGeometry.clone();
+      layerGeometry.setAttribute('crackDamage', new THREE.BufferAttribute(crackDamage, 1));
+
+      // holeMask is the GPU/gameplay-facing array (rendering discard,
+      // _checkBreak's guard, getRemainingWaxRatio) — for the single-layer
+      // case it's the per-vertex MAX of _localHoleMask (written ONLY by real
+      // local breaks, see _boostHoleAt) and the global cell-reveal condition
+      // (cellRevealThreshold vs globalRevealProgress, merged in by
+      // _applyGlobalReveal every frame); _localHoleMask is kept separate
+      // there specifically so the global reveal's own progress can be
+      // driven by "how much has ACTUALLY broken locally" without it being
+      // circular. 크루아상 (layerCount > 1) has no global reveal to merge in
+      // at all, so holeMask there is simply THE SAME array as
+      // _localHoleMask — _boostHoleAt's writes already ARE the final
+      // gameplay-facing state, no separate merge step needed. Each layer
+      // still gets its OWN hole arrays (unlike crackDamage above) even
+      // though _checkBreak always boosts every layer's together — the gap-
+      // collapse math in _rebuildPositions reads each layer's own holeMask
+      // independently, and keeping them as genuinely separate arrays (not
+      // just separate BufferAttributes over one shared array) is what makes
+      // that "always driven together, but never assumed to be the same
+      // array" safe to reason about.
+      const localHoleMask = new Float32Array(this.vertexCount);
+      const holeMask = this.layerCount === 1 ? new Float32Array(this.vertexCount) : localHoleMask;
+      layerGeometry.setAttribute('holeMask', new THREE.BufferAttribute(holeMask, 1));
+
+      const shellMaterial = shellMaterials[k];
+      const shellMesh = new THREE.Mesh(layerGeometry, shellMaterial);
+      shellMesh.matrixAutoUpdate = false;
+      // All layers (and the core) sit at the exact same local origin — only
+      // their geometry's own radius differs — so THREE's default transparent
+      // sort (by object position/bounding-sphere distance to camera) sees
+      // every layer at the IDENTICAL sort key and can't tell them apart by
+      // depth alone; without this, which layer visually "wins" ends up
+      // arbitrary (confirmed directly: the INNERMOST, palest layer rendered
+      // on top of the outer ones, showing through as if the outer coats
+      // were invisible even though their own colors were verified correct).
+      // renderOrder breaks that tie explicitly — innermost drawn first
+      // (lowest), outermost drawn last (highest, so it wins) — matching real
+      // back-to-front transparency ordering regardless of the tied depth
+      // key. A no-op for every existing wax type (layerCount 1 → always 0,
+      // THREE's own default).
+      shellMesh.renderOrder = this.layerCount - 1 - k;
+
+      this.layers.push({ shellGeometry: layerGeometry, shellMesh, shellMaterial, _localHoleMask: localHoleMask, holeMask });
+    }
+    // Back-compat single reference for internal use only (getRadialRadiusGrid
+    // — 왁뿌볼-only, always layerCount === 1, so "the shell" is unambiguous).
+    this.shellGeometry = this.layers[0].shellGeometry;
+    this.shellMeshes = this.layers.map((layer) => layer.shellMesh);
+    this.mesh = this.shellMeshes[0]; // scene wiring/pointer-interaction's bounding-sphere lookup — see main.js
+
+    this.coreGeometry = coreGeometry;
+    // crackDamage/holeMask are ALSO exposed on the CORE geometry, backed by
+    // the SAME typed arrays (crackDamage always; holeMask from the outermost
+    // layer — see above, every layer's holeMask ends up identical anyway) —
+    // writes in poke()/_boostFieldAt update both for free, but each
     // BufferAttribute still needs its own needsUpdate flip to actually
     // re-upload to the GPU (see update()/reset()). Core only acts on either
     // for "왁뿌볼" mode, which grows its own crack-line/hole network from
     // them (see wax-material.js/wax-crack-chunks.js) — a harmless unused
-    // varying for clay/slime.
+    // varying for every other mode, 크루아상 included (왁뿌볼 never has more
+    // than one layer, so "the outermost layer" is the only layer there).
     coreGeometry.setAttribute('crackDamage', new THREE.BufferAttribute(crackDamage, 1));
-    this.crackDamage = crackDamage;
+    coreGeometry.setAttribute('holeMask', new THREE.BufferAttribute(this.layers[0].holeMask, 1));
 
-    // this.holeMask is the GPU/gameplay-facing array (rendering discard,
-    // _checkBreak's guard, getRemainingWaxRatio) — it's the per-vertex MAX of
-    // _localHoleMask (written ONLY by real local breaks, see _boostHoleAt)
-    // and the global cell-reveal condition (cellRevealThreshold vs
-    // globalRevealProgress, merged in by _applyGlobalReveal every frame).
-    // _localHoleMask is kept separate specifically so the global reveal's
-    // own progress can be driven by "how much has ACTUALLY broken locally"
-    // without it being circular (globally-revealed cells feeding back into
-    // how many MORE cells get revealed).
-    const holeMask = new Float32Array(this.vertexCount);
-    shellGeometry.setAttribute('holeMask', new THREE.BufferAttribute(holeMask, 1));
-    coreGeometry.setAttribute('holeMask', new THREE.BufferAttribute(holeMask, 1));
-    this.holeMask = holeMask;
-    this._localHoleMask = new Float32Array(this.vertexCount);
-
-    this.coreGeometry = coreGeometry;
-    this.shellGeometry = shellGeometry;
     this.fillingGeometry = fillingGeometry;
 
     this.coreMesh = new THREE.Mesh(coreGeometry, coreMaterial);
     this.coreMesh.matrixAutoUpdate = false;
-    this.mesh = new THREE.Mesh(shellGeometry, shellMaterial); // shell — kept as `mesh` for pointer-interaction's bounding-sphere lookup
-    this.mesh.matrixAutoUpdate = false;
     // Only ever actually seen through a hole the core discards ("왁뿌볼" —
-    // see wax-material.js's createFillingMaterial) — for clay/slime, core has
-    // no holes of its own, so this permanently sits fully occluded behind it.
+    // see wax-material.js's createFillingMaterial) — for clay/slime/크루아상,
+    // core has no holes of its own, so this permanently sits fully occluded
+    // behind it.
     this.fillingMesh = new THREE.Mesh(fillingGeometry, fillingMaterial);
     this.fillingMesh.matrixAutoUpdate = false;
 
@@ -547,9 +754,16 @@ export class DeformableMesh {
    * long hold or several separate taps. holdSeconds is how long the CURRENT
    * continuous press has lasted; it only matters for a wax that has never
    * broken at all yet (see hasBrokenOnce below). Returns a fragment-pop
-   * descriptor ({ point, radius }) the moment a chunk actually breaks loose,
-   * or null otherwise — the caller uses this to spawn a falling debris piece
-   * and play the break sound in sync, even mid-hold.
+   * descriptor ({ point, radius, color }) the moment a chunk actually breaks
+   * loose, or null otherwise — the caller uses this to spawn a falling
+   * debris piece (in that broken layer's own color) and play the break
+   * sound in sync, even mid-hold.
+   *
+   * The dent/bulge displacement itself (plasticOffset/elasticSnapshot) is
+   * shared, core-level state — pressing a multi-layer 크루아상 spot
+   * compresses the WHOLE stack together, same as pressing anywhere else;
+   * layers are purely a shell-surface crack/hole/reveal concept layered on
+   * top of that shared dent, not extra independent physics per layer.
    */
   poke(pointWorld, normal, strength = 1, holdSeconds = 0) {
     const rest = this.restPosition;
@@ -645,7 +859,7 @@ export class DeformableMesh {
       target[i3 + 2] += pushZ * depth * dentWeight + restNormal[i3 + 2] * depth * BULGE_STRENGTH * bulgeWeight;
 
       if (dentWeight > 0) {
-        const next = this.crackDamage[v] + dentWeight * CRACK_RATE_PER_HIT * strength;
+        const next = this.crackDamage[v] + dentWeight * CRACK_RATE_PER_HIT * strength * this.crackRateMultiplier;
         this.crackDamage[v] = next > 1 ? 1 : next;
       }
     }
@@ -664,14 +878,51 @@ export class DeformableMesh {
   }
 
   /**
-   * Decides whether this poke just broke a chunk loose. Guarded by holeMask
-   * at the nearest vertex first: once the shell there has already fully
-   * opened up, there's no wax left to pop, so pressing on the exposed core
-   * underneath never spawns more debris (also what stops the very hole that
-   * just opened from immediately re-triggering next frame).
+   * Decides whether this poke just broke every remaining layer loose at
+   * once (see class doc comment). Guarded by the INNERMOST layer's holeMask
+   * at the nearest vertex first — NOT the outermost: since each layer's own
+   * hole radius tapers narrower toward the core (see
+   * holeRadiusMultiplierForLayer — "겉면이 제일 많이 떨어지고, 안쪽으로
+   * 갈수록 조금씩만"), a single break opens a WIDE area on the outermost
+   * layer but only a NARROWER area on the innermost one, so plenty of
+   * vertices end up with the outer layer already gone while an inner layer
+   * is still very much intact right there. Guarding on the outermost layer
+   * alone made every one of those spots permanently unbreakable the moment
+   * the outer layer opened nearby — confirmed directly: pressing on the
+   * "ring" around an already-opened hole did nothing no matter how many
+   * times it was hit ("겉면을 한 번 부수면 아무리 눌러도 두 번째와 세 번째가
+   * 안 깨지는데"). The innermost layer's own radius is a strict subset of
+   * every other layer's for the exact same break (same center, always a
+   * smaller radius) — so if IT'S already open somewhere, every other layer
+   * there necessarily already is too, making it the correct "truly nothing
+   * left to break here" check. For layerCount 1 the outermost and innermost
+   * are literally the same one layer, so this is unchanged from before.
    */
   _checkBreak(pointWorld, normal, nearestIndex, holdSeconds) {
-    if (this.holeMask[nearestIndex] > 0.5) return null;
+    if (this.layers[this.layerCount - 1].holeMask[nearestIndex] > 0.5) return null;
+    // Computed once (only for 크루아상 — every other type never needs it
+    // here) and reused below both for the low-remaining fragment color AND
+    // the low-remaining hole-radius cleanup boost, instead of calling
+    // getRemainingWaxRatio() twice over.
+    const remainingRatio = this.layerCount > 1 ? this.getRemainingWaxRatio() : 1;
+
+    // Every layer pops loose AT ONCE on a break (see below) — the caller
+    // spawns one fragment per entry here, all in the same burst, so each
+    // layer's own color appears fragmentCountForLayer(k, layerCount) times
+    // (more for the outermost, fewer toward the innermost — see that
+    // function's own comment). Read directly off each layer's OWN material
+    // — for every non-크루아상 type this is just a 1-element array with the
+    // single shared shell's own color, unchanged from before. Once almost
+    // nothing is left (see LOW_FRAGMENT_REMAINING_THRESHOLD), skip that big
+    // multi-color burst in favor of a single innermost-layer-colored piece.
+    const innermostColor = this.layers[this.layerCount - 1].shellMaterial.userData.waxUniforms.waxColor.value;
+    const colors =
+      this.layerCount > 1 && remainingRatio <= LOW_FRAGMENT_REMAINING_THRESHOLD
+        ? [innermostColor]
+        : this.layers.flatMap((layer, k) => {
+            const color = layer.shellMaterial.userData.waxUniforms.waxColor.value;
+            return Array(fragmentCountForLayer(k, this.layerCount)).fill(color);
+          });
 
     // Same flat-vs-rim blend as poke() (see _influenceRadiusFor), but by the
     // NEAREST vertex's own curvatureSafety — a break on the flat cap opens a
@@ -688,14 +939,20 @@ export class DeformableMesh {
       // so the wax reads as "it just cracked all over" rather than "a huge
       // chunk of it vanished".
       this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
-      this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
-      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true };
+      this.layers.forEach((layer, k) => {
+        const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
+        this._boostHoleAt(layer, pointWorld, normal, holeRadius);
+      });
+      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true, colors };
     }
 
     if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
     this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
-    this._boostHoleAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO);
-    return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false };
+    this.layers.forEach((layer, k) => {
+      const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
+      this._boostHoleAt(layer, pointWorld, normal, holeRadius);
+    });
+    return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false, colors };
   }
 
   /**
@@ -708,36 +965,59 @@ export class DeformableMesh {
    * exactly the "속이 비어서 반대편이 보이는" symptom this cycle set out to
    * fix. Only breaks fire this (not every frame), but it still defers the
    * sqrt past the cheap squared-distance range check, same as poke().
+   *
+   * jitterAmount (0 = perfectly smooth/circular, the old and only shape
+   * every break used to come out as — "뚫린 모양이 똑같다") randomly
+   * perturbs each vertex's effective distance from the click point by up to
+   * that fraction, so the resulting boundary comes out jagged/irregular
+   * instead of a clean circle. The random seed is freshly rolled EACH CALL
+   * (not derived from vertex position alone), so the exact same click point
+   * tears a differently-shaped hole from one break to the next, not just a
+   * fixed jagged pattern that happens to look different at different
+   * points on the shape.
    */
-  _boostFieldAt(field, pointWorld, normal, radius) {
+  _boostFieldAt(field, pointWorld, normal, radius, jitterAmount = 0) {
     const rest = this.restPosition;
     const restNormal = this.restNormal;
-    const radiusSq = radius * radius;
+    // Search a bit wider than the nominal radius so jitter can still bulge
+    // the boundary outward past it, not just inward.
+    const searchRadius = radius * (1 + jitterAmount);
+    const searchRadiusSq = searchRadius * searchRadius;
+    const seedX = jitterAmount > 0 ? Math.random() * 1000 : 0;
+    const seedY = jitterAmount > 0 ? Math.random() * 1000 : 0;
+    const seedZ = jitterAmount > 0 ? Math.random() * 1000 : 0;
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
       const dx = rest[i3] - pointWorld.x;
       const dy = rest[i3 + 1] - pointWorld.y;
       const dz = rest[i3 + 2] - pointWorld.z;
       const distSq = dx * dx + dy * dy + dz * dz;
-      if (distSq >= radiusSq) continue;
+      if (distSq >= searchRadiusSq) continue;
       const alignDot = restNormal[i3] * normal.x + restNormal[i3 + 1] * normal.y + restNormal[i3 + 2] * normal.z;
       const alignWeight = THREE.MathUtils.smoothstep(alignDot, NORMAL_ALIGN_GATE_START, NORMAL_ALIGN_GATE_END);
       if (alignWeight <= 0) continue;
-      const dist = Math.sqrt(distSq);
+      let dist = Math.sqrt(distSq);
+      if (jitterAmount > 0) {
+        // Reuses the same hash already used for Voronoi cell IDs above —
+        // just need a cheap, well-distributed pseudo-random 0..1 per vertex
+        // here, not an actual cell lookup.
+        const n = fractSin((rest[i3] + seedX) * 12.9898 + (rest[i3 + 1] + seedY) * 78.233 + (rest[i3 + 2] + seedZ) * 37.719);
+        dist *= 1 + (n - 0.5) * 2 * jitterAmount;
+      }
       const weight = THREE.MathUtils.smoothstep(radius - dist, 0, radius) * alignWeight;
       field[v] = Math.max(field[v], weight);
     }
     this._dirtyAttributes = true;
   }
 
-  /** Widens the visible crack network around a point without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. */
+  /** Widens the visible crack network around a point, without opening an actual hole — used for the first break's dramatic-but-not-empty payoff. crackDamage is shared across the whole layer stack (see class doc comment), so unlike _boostHoleAt this needs no layer argument. Deliberately NOT jittered (see HOLE_EDGE_JITTER's own comment) — the crack network already reads as organic via the shader's own Voronoi pattern regardless of this field's own (still smooth) boundary shape. */
   _boostCrackAt(pointWorld, normal, radius) {
     this._boostFieldAt(this.crackDamage, pointWorld, normal, radius);
   }
 
-  /** Marks the spot a chunk just fell off of as a clean hole — no crack cosmetics there, and the shader discards it so what's underneath shows through. Writes to _localHoleMask, NOT the GPU-facing holeMask directly — see that field's own doc comment; update()'s _applyGlobalReveal merges the two every frame. */
-  _boostHoleAt(pointWorld, normal, radius) {
-    this._boostFieldAt(this._localHoleMask, pointWorld, normal, radius);
+  /** Marks the spot a chunk just fell off of, on ONE layer, as a clean hole — no crack cosmetics there, and the shader discards it so what's underneath (the next layer in, or the core) shows through. Writes to that layer's _localHoleMask, NOT necessarily its GPU-facing holeMask directly — see that field's own doc comment; update()'s _applyGlobalReveal merges the two every frame for the single-layer case (the two are literally the same array for a multi-layer 크루아상, so this already IS the final value there). */
+  _boostHoleAt(layer, pointWorld, normal, radius) {
+    this._boostFieldAt(layer._localHoleMask, pointWorld, normal, radius, HOLE_EDGE_JITTER);
   }
 
   /**
@@ -808,7 +1088,9 @@ export class DeformableMesh {
     // can itself change holeMask, which _rebuildPositions() also needs (it
     // drives the shell's own gap collapse for clay/slime — see
     // holeAffectsGap there) to actually reflect a freshly-revealed cell.
-    if (this._dirtyAttributes && this._applyGlobalReveal()) {
+    // Only the single-layer case has a global reveal to merge in at all —
+    // see cellRevealThreshold's own doc comment.
+    if (this.layerCount === 1 && this._dirtyAttributes && this._applyGlobalReveal()) {
       needsPositionRebuild = true;
     }
 
@@ -817,8 +1099,10 @@ export class DeformableMesh {
     }
 
     if (this._dirtyAttributes) {
-      this.shellGeometry.attributes.crackDamage.needsUpdate = true;
-      this.shellGeometry.attributes.holeMask.needsUpdate = true;
+      for (const layer of this.layers) {
+        layer.shellGeometry.attributes.crackDamage.needsUpdate = true;
+        layer.shellGeometry.attributes.holeMask.needsUpdate = true;
+      }
       this.coreGeometry.attributes.crackDamage.needsUpdate = true;
       this.coreGeometry.attributes.holeMask.needsUpdate = true;
       this._dirtyAttributes = false;
@@ -829,20 +1113,24 @@ export class DeformableMesh {
   }
 
   /**
-   * Merges the "왁스가 여기저기 사라지는" global reveal into the real,
-   * GPU/gameplay-facing holeMask (see that field's own doc comment) — a
-   * vertex becomes gone there the moment EITHER a real local break covers it
-   * (_localHoleMask) OR its own fixed cellRevealThreshold is crossed by
-   * globalRevealProgress, which is itself driven by getLocalRemainingRatio()
-   * — LOCAL-only progress, so revealing more cells here can never feed back
-   * into revealing even more (no runaway cascade). Returns true if any
-   * vertex's merged value actually changed this call.
+   * Merges the "왁스가 여기저기 사라지는" global reveal into the outermost
+   * (and, for the single-layer case, only) layer's real, GPU/gameplay-facing
+   * holeMask (see that field's own doc comment) — a vertex becomes gone
+   * there the moment EITHER a real local break covers it (_localHoleMask) OR
+   * its own fixed cellRevealThreshold is crossed by globalRevealProgress,
+   * which is itself driven by getLocalRemainingRatio() — LOCAL-only
+   * progress, so revealing more cells here can never feed back into
+   * revealing even more (no runaway cascade). Returns true if any vertex's
+   * merged value actually changed this call. Only ever invoked for
+   * layerCount === 1 — see that field's own doc comment on why 크루아상
+   * skips this mechanic entirely.
    */
   _applyGlobalReveal() {
+    const layer = this.layers[0];
     this.globalRevealProgress = 1 - this.getLocalRemainingRatio();
     const threshold = this.cellRevealThreshold;
-    const local = this._localHoleMask;
-    const hole = this.holeMask;
+    const local = layer._localHoleMask;
+    const hole = layer.holeMask;
     const progress = this.globalRevealProgress;
     let changed = false;
     for (let v = 0; v < this.vertexCount; v++) {
@@ -855,9 +1143,23 @@ export class DeformableMesh {
     return changed;
   }
 
+  /**
+   * Every layer's outer surface = the core's own position, plus that layer's
+   * own gap, plus every layer BELOW it (closer to the core)'s own gap too —
+   * stacked innermost-out (see class doc comment). Walking the layer array
+   * from the innermost index down to 0 while accumulating a running offset
+   * builds exactly that: by the time the loop reaches layer k, the running
+   * offset already holds every inner layer's contribution, so adding just
+   * that one layer's own gap lands exactly on its true outer surface. If
+   * layer k's own gap has collapsed to 0 (its hole is open there), its
+   * position ends up IDENTICAL to the layer just inside it — flush, with
+   * layer k's own fragment shader discarding there (see
+   * wax-crack-chunks.js), so what actually shows through is that next layer
+   * in (or the bare core, once every layer's gap is 0). For layerCount 1
+   * this reduces to exactly the old single "shell = core + one gap" formula.
+   */
   _rebuildPositions() {
     const corePos = this.coreGeometry.attributes.position.array;
-    const shellPos = this.shellGeometry.attributes.position.array;
     const fillingPos = this.fillingGeometry.attributes.position.array;
     const rest = this.restPosition;
     const restNormal = this.restNormal;
@@ -866,26 +1168,19 @@ export class DeformableMesh {
     const decay = this.elasticDecay;
     const localShellThickness = this.localShellThickness;
     const fillingInset = this.fillingInset;
-    const holeMask = this.holeMask;
+    const layers = this.layers;
+    const layerCount = this.layerCount;
     // "왁뿌볼"'s outer skin never opens a hole — see wax-material.js's
-    // SHELL_LOOK.waxbbuShell — so unlike clay/slime, its gap shouldn't
-    // collapse toward the core wherever the INNER wax underneath has
-    // actually broken; it stays a constant, smooth, always-intact thickness
-    // regardless of holeMask.
+    // SHELL_LOOK.waxbbuShell — so unlike clay/slime/크루아상, its gap
+    // shouldn't collapse toward the core wherever the INNER wax underneath
+    // has actually broken; it stays a constant, smooth, always-intact
+    // thickness regardless of holeMask. 왁뿌볼 never has more than one layer,
+    // so this only ever matters for that single layer.
     const holeAffectsGap = this.materialMode !== 'waxbbu';
 
-    // The shell is always defined AS the core's own surface plus a constant
-    // outward gap (shrinking to 0 exactly at a hole, except for "왁뿌볼" —
-    // see holeAffectsGap above) — never as an independently-blended rest
-    // shape. That guarantees the coating can never be poked through by a big
-    // dent or bulge, however far the core moves: it's not "how much does the
-    // shell follow", it's "the shell IS wherever the core is, plus a thin
-    // skin" (that skin's own thickness already narrowed per-vertex at any
-    // tight/concave spot — see localShellThickness in the constructor).
     const containmentRadiusPerVertex = this.containmentRadiusPerVertex;
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
-      const gap = holeAffectsGap ? localShellThickness[v] * (1 - holeMask[v]) : localShellThickness[v];
 
       let cx = rest[i3] + plastic[i3] + elastic[i3] * decay;
       let cy = rest[i3 + 1] + plastic[i3 + 1] + elastic[i3 + 1] * decay;
@@ -910,20 +1205,37 @@ export class DeformableMesh {
       corePos[i3] = cx;
       corePos[i3 + 1] = cy;
       corePos[i3 + 2] = cz;
-      shellPos[i3] = cx + restNormal[i3] * gap;
-      shellPos[i3 + 1] = cy + restNormal[i3 + 1] * gap;
-      shellPos[i3 + 2] = cz + restNormal[i3 + 2] * gap;
       fillingPos[i3] = cx - restNormal[i3] * fillingInset;
       fillingPos[i3 + 1] = cy - restNormal[i3 + 1] * fillingInset;
       fillingPos[i3 + 2] = cz - restNormal[i3 + 2] * fillingInset;
+
+      // Stack layers innermost (layerCount-1) outward to outermost (0),
+      // accumulating thickness as we go — see this method's own doc comment.
+      let cumX = cx;
+      let cumY = cy;
+      let cumZ = cz;
+      for (let k = layerCount - 1; k >= 0; k--) {
+        const layer = layers[k];
+        const gap = holeAffectsGap ? localShellThickness[v] * (1 - layer.holeMask[v]) : localShellThickness[v];
+        cumX += restNormal[i3] * gap;
+        cumY += restNormal[i3 + 1] * gap;
+        cumZ += restNormal[i3 + 2] * gap;
+        const shellPos = layer.shellGeometry.attributes.position.array;
+        shellPos[i3] = cumX;
+        shellPos[i3 + 1] = cumY;
+        shellPos[i3 + 2] = cumZ;
+      }
     }
 
     this.coreGeometry.attributes.position.needsUpdate = true;
-    this.shellGeometry.attributes.position.needsUpdate = true;
     this.fillingGeometry.attributes.position.needsUpdate = true;
     this.coreGeometry.computeVertexNormals();
-    this.shellGeometry.computeVertexNormals();
     this.fillingGeometry.computeVertexNormals();
+    for (let k = 0; k < layerCount; k++) {
+      const layer = layers[k];
+      layer.shellGeometry.attributes.position.needsUpdate = true;
+      layer.shellGeometry.computeVertexNormals();
+    }
   }
 
   /**
@@ -941,32 +1253,46 @@ export class DeformableMesh {
    * "past the same line the shader itself discards at" instead means this
    * reaches 0% at exactly the moment the last visible scrap disappears.
    *
-   * Reads the MERGED holeMask (local breaks + global cell reveal — see that
-   * field's own doc comment), so this now correctly reaches 0% once
-   * everything visible is gone even if a lot of it disappeared via the
-   * global reveal rather than a real local break — it used to only track
-   * local breaks, which left this stuck showing wax "remaining" long after
-   * it had visibly all flaked away, and let clicking an already-visually-
-   * empty spot still register as a break (see _checkBreak's holeMask guard).
+   * Averages, across every vertex, WHAT FRACTION of its own layers are
+   * still intact (not just whether the outermost one is) — for layerCount 1
+   * that's just "is THE layer intact, 0 or 1", identical to the old
+   * single-layer formula. Needs to look past the outermost layer alone now
+   * that each layer opens over a DIFFERENT radius (see
+   * holeRadiusMultiplierForLayer — "겉면이 제일 많이 떨어지고, 안쪽으로
+   * 갈수록 조금씩만"): a break leaves plenty of vertices where the outer
+   * layer has opened but an inner one is still very much visible and
+   * intact right there, so counting "outer open ⟹ 0% left here" made the
+   * displayed % drop far faster than what was actually still visibly on
+   * screen — confirmed directly from a screenshot showing a clearly
+   * still-mostly-intact ball reporting 8% remaining ("아무리 봐도 8%
+   * 남은거같지 않은데"). Each layer's own radius is always ⊇ every layer
+   * further in for the SAME break (see holeRadiusMultiplierForLayer's own
+   * ordering), so "how many of a vertex's layers are intact" is always a
+   * clean 0..layerCount count, never something in between two layers that
+   * doesn't correspond to a real state.
    */
   getRemainingWaxRatio() {
-    let remainingCount = 0;
+    let remainingLayerSum = 0;
     for (let v = 0; v < this.vertexCount; v++) {
-      if (this.holeMask[v] <= 0.5) remainingCount++;
+      for (let k = 0; k < this.layerCount; k++) {
+        if (this.layers[k].holeMask[v] <= 0.5) remainingLayerSum++;
+      }
     }
-    return remainingCount / this.vertexCount;
+    return remainingLayerSum / (this.layerCount * this.vertexCount);
   }
 
   /**
-   * Buckets this mesh's own shell into a lat/lon grid (see
-   * containmentBinIndex), each cell holding the CURRENT (this frame's,
-   * already-dented) shortest distance from the origin among every shell
-   * vertex whose LIVE position falls in that cell — used by
-   * composite-waxbbu-mesh.js (via buildContainmentFromGrid below) as a
-   * per-direction containment boundary for the wax inside it. Reads the
-   * LIVE surface, not this.radius (the NOMINAL, undeformed one): while the
-   * bubble is actively dented inward at the press point, its real surface
-   * there sits well inside its own nominal radius.
+   * Buckets this mesh's own shell (its OUTERMOST layer — see
+   * this.shellGeometry) into a lat/lon grid (see containmentBinIndex), each
+   * cell holding the CURRENT (this frame's, already-dented) shortest
+   * distance from the origin among every shell vertex whose LIVE position
+   * falls in that cell — used by composite-waxbbu-mesh.js (via
+   * buildContainmentFromGrid below) as a per-direction containment boundary
+   * for the wax inside it. Only ever called for "왁뿌볼" (always
+   * layerCount === 1, so "the outermost layer" is unambiguously the whole
+   * shell). Reads the LIVE surface, not this.radius (the NOMINAL, undeformed
+   * one): while the bubble is actively dented inward at the press point, its
+   * real surface there sits well inside its own nominal radius.
    *
    * Deliberately a GRID over the whole shell, not one single global minimum
    * — an earlier version returned just the shell's overall closest-to-origin
@@ -1042,36 +1368,41 @@ export class DeformableMesh {
     return result;
   }
 
-  /** LOCAL-only remaining ratio — counts only real, click-driven breaks (_localHoleMask), blind to the global reveal. Exists purely to safely DRIVE globalRevealProgress in _applyGlobalReveal without creating a feedback loop with getRemainingWaxRatio's own (merged) result. */
+  /** LOCAL-only remaining ratio for the outermost (single, in this case) layer — counts only real, click-driven breaks (_localHoleMask), blind to the global reveal. Exists purely to safely DRIVE globalRevealProgress in _applyGlobalReveal without creating a feedback loop with getRemainingWaxRatio's own (merged) result. Only ever called for layerCount === 1 — see _applyGlobalReveal. */
   getLocalRemainingRatio() {
     let remainingCount = 0;
+    const local = this.layers[0]._localHoleMask;
     for (let v = 0; v < this.vertexCount; v++) {
-      if (this._localHoleMask[v] <= 0.5) remainingCount++;
+      if (local[v] <= 0.5) remainingCount++;
     }
     return remainingCount / this.vertexCount;
   }
 
-  /** Restores a pristine, uncracked wax shape. */
+  /** Restores a pristine, uncracked wax shape — the shared crackDamage plus every layer's own hole state. */
   reset() {
     this.plasticOffset.fill(0);
     this.elasticSnapshot.fill(0);
     this.elasticDecay = 0;
     this._elasticHeld = false;
     this.crackDamage.fill(0);
-    this.holeMask.fill(0);
-    this._localHoleMask.fill(0);
+    for (const layer of this.layers) {
+      layer.holeMask.fill(0);
+      if (layer._localHoleMask !== layer.holeMask) layer._localHoleMask.fill(0);
+    }
     this.globalRevealProgress = 0;
     this.hasBrokenOnce = false;
     this._rebuildPositions();
-    this.shellGeometry.attributes.crackDamage.needsUpdate = true;
-    this.shellGeometry.attributes.holeMask.needsUpdate = true;
+    for (const layer of this.layers) {
+      layer.shellGeometry.attributes.crackDamage.needsUpdate = true;
+      layer.shellGeometry.attributes.holeMask.needsUpdate = true;
+    }
     this.coreGeometry.attributes.crackDamage.needsUpdate = true;
     this.coreGeometry.attributes.holeMask.needsUpdate = true;
   }
 
   dispose() {
     this.coreGeometry.dispose();
-    this.shellGeometry.dispose();
     this.fillingGeometry.dispose();
+    for (const layer of this.layers) layer.shellGeometry.dispose();
   }
 }

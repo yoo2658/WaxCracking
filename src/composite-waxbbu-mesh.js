@@ -44,6 +44,12 @@ export class CompositeWaxbbuMesh {
     // unused shell are simply never added, so they cost some wasted
     // per-frame geometry updates but never render.
     this.mesh = shellDeform.mesh;
+    // shellDeform is always a single-layer (layerCount 1) plain sphere for
+    // 왁뿌볼 — see main.js's buildDeformable — so this is always a 1-element
+    // array, but main.js's scene wiring always iterates shellMeshes (to also
+    // support 크루아상's multi-layer stack elsewhere), so this facade needs
+    // to expose it too, not just the single `.mesh` alias.
+    this.shellMeshes = shellDeform.shellMeshes;
     this.coreMesh = coreDeform.coreMesh;
     this.fillingMesh = coreDeform.fillingMesh;
 

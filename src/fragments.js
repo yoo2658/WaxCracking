@@ -1,7 +1,11 @@
 import * as THREE from 'three';
 
 const GRAVITY = -9.8;
-const MAX_FRAGMENTS = 24;
+// Raised from 24 — 크루아상's multi-layer breaks (deformable-mesh.js's
+// fragmentCountForLayer) can pop up to ~11 fragments in a single burst, so
+// the old cap let a second quick break prematurely cull pieces from the
+// first one before they'd even finished falling/fading.
+const MAX_FRAGMENTS = 40;
 const LAND_LINGER_SECONDS = 1.0; // how long a landed fragment stays before fading
 const FADE_SECONDS = 0.5;
 

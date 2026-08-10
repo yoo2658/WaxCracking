@@ -215,7 +215,7 @@ export class PointerInteraction {
     if (fragmentSpawn) {
       active.soundPlayed = true;
       this.onPoke?.(targetStrength, fragmentSpawn.isFirstBreak);
-      this.onFragmentPop?.(fragmentSpawn.point, active.normal, fragmentSpawn.radius);
+      this.onFragmentPop?.(fragmentSpawn.point, active.normal, fragmentSpawn.radius, fragmentSpawn.colors);
     }
   }
 }

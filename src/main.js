@@ -10,6 +10,7 @@ import {
   setProjectionScale,
   setCoreMaterialMode,
   setShellLook,
+  setCroissantLayerLook,
   setFillingMix,
   setCellReveal,
   setShellCellReveal,
@@ -28,6 +29,19 @@ const baseFov = camera.fov;
 const coreMaterial = createCoreMaterial();
 const shellMaterial = createShellMaterial();
 const fillingMaterial = createFillingMaterial();
+// 크루아상("여러 겹 둘러싼" 왁스 — 2026-08-07/15_Plan.md)의 셸 스택 겹 수 —
+// 바꾸고 싶으면 이 숫자만 바꾸면 됨(색 그라디언트도 setCroissantLayerLook이
+// 알아서 이 개수만큼 다시 나눠 계산함). 인덱스 0 = 가장 바깥(가장 먼저
+// 부서짐) — deformable-mesh.js의 layerCount/레이어 배열과 순서가 정확히
+// 같아야 함. 사용자가 고를 수 있는 값이 아니라 한 번 정해진 색/광택 그대로
+// 계속 쓰이므로, 여기서 딱 한 번만 적용하고 이후 다시 건드리지 않음 — 다른
+// 왁스 종류들처럼 setShellLook을 매번 재호출하는 shellMaterial과 다른 점.
+const CROISSANT_LAYER_COUNT = 5;
+const croissantShellMaterials = Array.from({ length: CROISSANT_LAYER_COUNT }, (_, layerIndex) => {
+  const material = createShellMaterial();
+  setCroissantLayerLook(material, layerIndex, CROISSANT_LAYER_COUNT);
+  return material;
+});
 const fragments = new FragmentSystem(scene, groundY);
 let currentMaterialMode = 'clay';
 let currentWaxType = 'basic';
@@ -56,13 +70,18 @@ const WAXBBU_BUBBLE_RADIUS_SCALE = 1.15;
  */
 function buildDeformable(geometry, isCustom) {
   if (currentMaterialMode === 'waxbbu' && isCustom) {
-    const shellDeform = new DeformableMesh(buildSphereGeometry(WAXBBU_BUBBLE_RADIUS_SCALE), coreMaterial, shellMaterial, fillingMaterial);
-    const coreDeform = new DeformableMesh(geometry, coreMaterial, shellMaterial, fillingMaterial);
+    const shellDeform = new DeformableMesh(buildSphereGeometry(WAXBBU_BUBBLE_RADIUS_SCALE), coreMaterial, [shellMaterial], fillingMaterial);
+    const coreDeform = new DeformableMesh(geometry, coreMaterial, [shellMaterial], fillingMaterial);
     // CompositeWaxbbuMesh's own constructor sets each half's materialMode
     // and the core's containmentRadius itself — see its own doc comments.
     return new CompositeWaxbbuMesh(shellDeform, coreDeform);
   }
-  const deform = new DeformableMesh(geometry, coreMaterial, shellMaterial, fillingMaterial);
+  // 크루아상(여러 겹)은 왁뿌볼과 함께 쓸 수 없음 — composite-waxbbu-mesh.js는
+  // 항상 셸 1장짜리 독립 구조를 요구함(위 분기). onMaterialChange/
+  // onWaxTypeChange가 이 조합이 바뀔 때마다 항상 다시 지어주므로, 여기서는
+  // "지금 이 순간" 기준으로만 몇 장 쌓을지 고르면 됨.
+  const shellMaterials = currentMaterialMode !== 'waxbbu' && currentWaxType === 'croissant' ? croissantShellMaterials : [shellMaterial];
+  const deform = new DeformableMesh(geometry, coreMaterial, shellMaterials, fillingMaterial);
   deform.setMaterialMode(currentMaterialMode);
   return deform;
 }
@@ -102,12 +121,36 @@ function startNewWaxTracking() {
   setShellCellReveal(shellMaterial, deformable.globalRevealProgress);
 }
 
+/**
+ * Filling only ever needs to be VISIBLE for "왁뿌볼" (a real backdrop
+ * revealed through an actual hole — see wax-material.js's
+ * createFillingMaterial) — every other mode's core never discards at all,
+ * so filling is always meant to stay fully hidden behind it there. Setting
+ * this explicitly (rather than leaving THREE's own default — always
+ * visible) closes off a real rendering gap otherwise: a single vertex
+ * plastically dented very deep by many repeated presses at the exact same
+ * spot can stretch its neighboring core triangles enough that tiny gaps
+ * open up between them, letting filling's own (visually mismatched,
+ * near-white) color peek through even though nothing ever actually
+ * discarded — confirmed directly: "전부 부숴서 왁스가 남지 않은 상태에서,
+ * 한 군데만 계속 누르면 속이 하얗게 보여" reproduced exactly this way, and
+ * hiding filling outright made it disappear completely. Must be re-applied
+ * after every buildDeformable() call (a fresh mesh defaults to visible)
+ * AND on a plain mode switch that doesn't rebuild anything (see
+ * onMaterialChange) — currentMaterialMode is read fresh each call, not
+ * captured once.
+ */
+function syncFillingVisibility() {
+  deformable.fillingMesh.visible = currentMaterialMode === 'waxbbu';
+}
+
 let deformable = buildDeformable(buildSphereGeometry(), false);
+syncFillingVisibility();
 setCoreMaterialMode(coreMaterial, currentMaterialMode);
 setShellLook(shellMaterial, 'basic');
 setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
 scene.add(deformable.coreMesh);
-scene.add(deformable.mesh);
+for (const shellMesh of deformable.shellMeshes) scene.add(shellMesh);
 scene.add(deformable.fillingMesh);
 
 /**
@@ -121,13 +164,14 @@ scene.add(deformable.fillingMesh);
  */
 function rebuildShape(geometry, isCustom) {
   scene.remove(deformable.coreMesh);
-  scene.remove(deformable.mesh);
+  for (const shellMesh of deformable.shellMeshes) scene.remove(shellMesh);
   scene.remove(deformable.fillingMesh);
   deformable.dispose();
 
   deformable = buildDeformable(geometry, isCustom);
+  syncFillingVisibility();
   scene.add(deformable.coreMesh);
-  scene.add(deformable.mesh);
+  for (const shellMesh of deformable.shellMeshes) scene.add(shellMesh);
   scene.add(deformable.fillingMesh);
   setProjectionScale(coreMaterial, shellMaterial, deformable.imageFrameHalfExtent);
   startNewWaxTracking();
@@ -142,6 +186,7 @@ let shortTapCount = 0;
 
 const COMPLETION_REMAINING_THRESHOLD = 0.1; // "부수기 완료" fires once remaining wax drops to <=10%
 const WAXBBU_LOW_SOUND_THRESHOLD = 0.4; // "왁뿌볼" switches to its lowest (calmer stone-cracking) sound tier once remaining wax drops to <=40%
+const CROISSANT_LOW_SOUND_THRESHOLD = 0.15; // 크루아상이 왁뿌볼의 calmer 사운드 풀로 (3개→2개) 줄어드는 기준 — "왁스가 많이 떨어졌는데도 소리가 큼직한 게 많이 나서 어색". deformable-mesh.js의 LOW_FRAGMENT_REMAINING_THRESHOLD와 항상 같은 값으로 유지 — 그 지점부터 소리와 파편이 같이 차분해짐.
 
 const pointerInteraction = new PointerInteraction({
   renderer,
@@ -157,14 +202,23 @@ const pointerInteraction = new PointerInteraction({
       playWaxbbuSound(tier, strength);
       return;
     }
-    playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak);
+    // 크루아상만 해당 — 남은 왁스가 CROISSANT_LOW_SOUND_THRESHOLD 이하로
+    // 떨어지면 audio.js가 더 차분한(적은 개수의) 사운드 풀로 바꿈.
+    const isCroissantLow = currentWaxType === 'croissant' && !isFirstBreak && deformable.getRemainingWaxRatio() <= CROISSANT_LOW_SOUND_THRESHOLD;
+    playMaterialSound(currentMaterialMode, currentWaxType, strength, isFirstBreak, isCroissantLow);
   },
-  onFragmentPop: (point, normal, radius) => {
+  onFragmentPop: (point, normal, radius, colors) => {
     // "왁뿌볼" breaks stay sealed inside its rubbery skin (no mess) — skip
     // spawning a piece that visibly pops out and falls, even though the
     // break itself (sound, hasBrokenOnce, holeMask) still happens normally.
     if (currentMaterialMode === 'waxbbu') return;
-    fragments.spawn(point, normal, shellMaterial.userData.waxUniforms.waxColor.value, radius);
+    // colors comes straight from DeformableMesh's _checkBreak — one entry
+    // per layer that just broke, ALL of them at once (see class doc
+    // comment on why 크루아상 pops its whole 3-coat stack together, not one
+    // layer at a time). Every non-크루아상 type just has the single shared
+    // shell's own color, so this spawns exactly one fragment, same as
+    // before this array existed.
+    for (const color of colors) fragments.spawn(point, normal, color, radius);
   },
   // x is only ever passed as null to mean "hide/reset" (release, drag, or the
   // break itself) — see pointer-interaction.js. The screen coordinates
@@ -210,12 +264,26 @@ function requestRender() {
 
 const { initialColor } = initUI({
   onWaxTypeChange: (waxType) => {
+    // 크루아상은 색만 다른 스킨이 아니라 실제로 셸을 3장 쌓는 별도 구조라
+    // (deformable-mesh.js의 layerCount) — 색만 바꿔서는 안 되고, 크루아상으로
+    // 들어가거나 나올 때는 구조 자체를 다시 지어야 함. 그 외 모든 종류끼리의
+    // 전환(예: 기본→초콜릿)은 지금처럼 색만 바꿈. 왁뿌볼 모드에서는 이 행
+    // 자체가 숨겨져 있어(ui.js) 호출되지 않음.
+    const layeredChanged = (waxType === 'croissant') !== (currentWaxType === 'croissant');
     currentWaxType = waxType;
     setShellLook(shellMaterial, waxType);
+    if (layeredChanged) {
+      rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+    }
     requestRender();
   },
   onMaterialChange: (mode) => {
     const modeChanged = mode !== currentMaterialMode;
+    // 사진 모양에서 왁뿌볼 ↔ 다른 재질 전환은 겉면 구조 자체(분리형 vs 기존
+    // 단일형, 09_Plan.md)가 달라져야 하고, 크루아상이 선택된 상태에서 왁뿌볼
+    // ↔ 다른 재질 전환은 겹 구조 자체(1장 vs 3장, buildDeformable)가 달라져야
+    // 함 — 둘 다 setMaterialMode만으로는 반영이 안 되고 다시 지어야 함.
+    const structureChanged = modeChanged && (isCustomShape || currentWaxType === 'croissant');
     currentMaterialMode = mode;
     setCoreMaterialMode(coreMaterial, mode);
     // "왁뿌볼" always wears its own dedicated rubbery-skin look regardless of
@@ -229,16 +297,14 @@ const { initialColor } = initUI({
     // 새 왁스로 시작 — 재질별로 부서지는 방식이 서로 달라서(구멍 vs 조각 소멸)
     // 이전 재질의 손상 흔적이 남아있으면 어색해 보인다는 피드백. 이미 선택된
     // 재질을 다시 눌렀을 때는(값이 안 바뀜) 리셋하지 않음.
-    if (modeChanged && isCustomShape) {
-      // "왁뿌볼" ↔ 다른 재질 전환은 사진 모양에서는 겉면 구조 자체(분리형 vs
-      // 기존 단일형, 09_Plan.md)가 달라져야 해서 setMaterialMode만으로는 안
-      // 되고 다시 지어야 함 — buildDeformable이 이미 위에서 바뀐
-      // currentMaterialMode를 보고 알맞은 구조를 고름. rebuildShape이 이미
-      // startNewWaxTracking()을 호출하므로 아래 else 분기의 리셋과 중복되지
-      // 않음.
-      rebuildShape(buildImageGeometry(currentSilhouette), true);
+    if (structureChanged) {
+      // buildDeformable이 이미 위에서 바뀐 currentMaterialMode를 보고 알맞은
+      // 구조(합성/겹 수)를 고름. rebuildShape이 이미 startNewWaxTracking()을
+      // 호출하므로 아래 else 분기의 리셋과 중복되지 않음.
+      rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
     } else {
       deformable.setMaterialMode(mode);
+      syncFillingVisibility();
       if (modeChanged) {
         deformable.reset();
         fragments.reset();
@@ -323,11 +389,14 @@ function tick() {
       // setCellReveal's own doc comment on why it must be this exact,
       // shared-with-the-CPU-side value.
       setCellReveal(coreMaterial, fillingMaterial, deformable.globalRevealProgress);
-    } else {
+    } else if (deformable.layerCount === 1) {
       // Clay/slime's own counterpart — see setShellCellReveal's own doc
       // comment. The shader's crackVisible gate already makes this inert
       // for "왁뿌볼", but skipping the call there too avoids fighting over
       // shellCellRevealProgress with anything else touching this material.
+      // 크루아상(layerCount > 1)은 이 전역 소멸 효과 자체를 안 씀(때린
+      // 자리만 겹겹이 뚫리는 방식 — 2026-08-07/15_Plan.md) — shellMaterial도
+      // 그 상태에서는 화면에 없는(사용되지 않는) 재질이라 건드릴 필요 없음.
       setShellCellReveal(shellMaterial, deformable.globalRevealProgress);
     }
     if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {
