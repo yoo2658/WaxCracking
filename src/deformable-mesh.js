@@ -479,30 +479,29 @@ export class DeformableMesh {
     this.vertexCount = basePositionAttr.count;
     const baseRestPosition = basePositionAttr.array;
 
-    // Per-vertex ceiling on the shell's TOTAL thickness (every layer added
-    // together), set by geometries.js sampling the silhouette's own
-    // local-thickness field directly at each vertex's position (see
-    // geometries.js's computeShellClearance) — small at a silhouette's
-    // narrow/concave spots (between two ears, an armpit, a thin hair
-    // spike, ...), large anywhere wide open, including the whole sphere.
-    // Without this, the shell's constant outward offset could push both
-    // sides of a narrow neck past each other, leaving a gap right there that
+    // Per-vertex ceiling on ONE LAYER's own thickness, set by geometries.js
+    // sampling the silhouette's own local-thickness field directly at each
+    // vertex's position (see geometries.js's computeShellClearance) — small
+    // at a silhouette's narrow/concave spots (between two ears, an armpit, a
+    // thin hair spike, ...), large anywhere wide open, including the whole
+    // sphere. Without this, a layer's constant offset could push both sides
+    // of a narrow neck past each other, leaving a gap right there that
     // exposes the core (and whatever photo/color it's showing) — reported
     // directly as "복잡한 경계면은 왁스가 감싸지지 않고 속 재질이 보이는"
     // (see 2026-08-05/14_Plan.md). Precomputed once here (not re-derived
     // every frame in _rebuildPositions()) since shellClearance itself never
-    // changes after the shape is built. Clamped on the TOTAL stacked
-    // thickness, not any one layer's own share of it — otherwise a narrow
-    // custom shape could let a multi-layer 크루아상's OUTERMOST layer cross
-    // the opposite side even though each individual layer looked safely
-    // thin on its own; every layer then gets an even share of whatever total
-    // actually fits (for layerCount 1, this is identical to before).
+    // changes after the shape is built.
+    //
+    // Clamped PER LAYER now, not on the total stacked thickness like an
+    // earlier version did (2026-08-11/03_Plan.md) — see restPosition below on
+    // why the core's own inset no longer depends on layerCount at all: every
+    // layer, 크루아상's 5 included, uses this exact same per-vertex value, so
+    // a narrow spot stays proportionally thin no matter how many layers are
+    // stacked on top of it, same as it already was for layerCount 1.
     const shellClearance = baseGeometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
     this.localShellThickness = new Float32Array(this.vertexCount);
     for (let v = 0; v < this.vertexCount; v++) {
-      const totalThickness = perLayerThickness * this.layerCount;
-      const clampedTotal = Math.min(totalThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
-      this.localShellThickness[v] = clampedTotal / this.layerCount;
+      this.localShellThickness[v] = Math.min(perLayerThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
     }
 
     // The shape's real vertex normals (geometries.js runs every shape through
@@ -533,16 +532,28 @@ export class DeformableMesh {
       }
     }
 
-    // The CORE's own rest surface — inset from the base (outermost layer's)
-    // silhouette by the FULL stacked shell thickness (every layer's own
-    // localShellThickness added together), so the outermost layer's own rest
-    // surface lands exactly ON the base silhouette regardless of layerCount
-    // — for layerCount 1 this is the exact same single subtraction as
-    // before this class supported more than one layer.
+    // The CORE's own rest surface — inset from the base (traced/sphere)
+    // silhouette by exactly ONE layer's own thickness, same as layerCount 1
+    // always was, NOT the full stacked total an earlier version used
+    // (2026-08-11/03_Plan.md). The extra crust layers stack OUTWARD from
+    // here instead (see _rebuildPositions' cumulative gap chain) — past the
+    // base silhouette's own surface — rather than eating into the core's
+    // own room to make space for them. This keeps 크루아상's core exactly as
+    // deep as any other wax type's, regardless of layerCount, which matters
+    // for two things at once: (1) a broken-open crater's floor now sits at
+    // the same relative depth everywhere on the shape, not just near the
+    // curved rim (see 03_Plan.md's root-cause writeup on why a flat custom
+    // shape's front/back caps read as far more "sunken" than the rim when
+    // the core was pushed in by the FULL 5-layer total); (2) the poke depth
+    // caps below (maxDisplacementFlat/Rim, both thicknessAxis-relative) were
+    // always tuned assuming this shallow, layerCount-independent core depth
+    // — a 크루아상 whose core sat much deeper wasn't just visually sunken at
+    // rest, it also had that much MORE plastic-dent room stacked on top,
+    // compounding the same problem every time the same spot got poked again.
     this.restPosition = new Float32Array(this.vertexCount * 3);
     for (let v = 0; v < this.vertexCount; v++) {
       const i3 = v * 3;
-      const t = this.localShellThickness[v] * this.layerCount;
+      const t = this.localShellThickness[v];
       this.restPosition[i3] = baseRestPosition[i3] - this.restNormal[i3] * t;
       this.restPosition[i3 + 1] = baseRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
       this.restPosition[i3 + 2] = baseRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
@@ -1296,25 +1307,40 @@ export class DeformableMesh {
     this.fillingGeometry.attributes.position.needsUpdate = true;
     this.coreGeometry.computeVertexNormals();
 
-    // Filling and every shell layer share the CORE's exact topology, offset
+    // Filling and every INNER shell layer (never visible pre-break — see
+    // class doc comment) share the CORE's exact topology, offset
     // outward/inward from it by a small constant gap along each vertex's
-    // OWN rest normal — geometrically, that means their true surface normal
-    // is always extremely close to the core's own at that same vertex (a
-    // thin coating barely bends the surface it's wrapped around). Reusing
-    // the core's own just-computed normals here — a cheap array copy — for
-    // all of them instead of running computeVertexNormals() again per
-    // layer (each one an O(vertex count) pass in its own right) cuts what
-    // used to be 3-7 full recomputes down to 1 real one, with no visible
-    // difference (see 2026-08-07's optimization pass — reported lag with
-    // 크루아상's 5 extra shell layers in particular, which used to mean 7
-    // separate full recomputes every single deforming frame).
+    // OWN rest normal, so reusing the core's own just-computed normals here
+    // — a cheap array copy — instead of running computeVertexNormals()
+    // again per layer is safe for them: nobody ever SEES the mismatch this
+    // causes (see below).
+    //
+    // The OUTERMOST layer (layer 0) is a different story (2026-08-11/
+    // 11_Plan.md): it's the one surface actually on screen before anything
+    // breaks, and a uniform inward offset does NOT preserve a curved
+    // surface's own curvature/normals in general — only a plane or a sphere
+    // offsets that cleanly. A custom photo shape's domed flat caps
+    // (geometries.js's domeFlatCaps) are convex, so the core's version of
+    // that same patch, pushed inward, is measurably FLATTER than the
+    // shell's own true surface there. Copying the core's normals onto the
+    // outermost layer made it visibly SHADE as flatter than its own real
+    // (entirely unmoved) position — reported directly as "리셋하면 앞/뒤가
+    // 들어가 보인다", reproduced with zero pokes, immediately after a bare
+    // reset(). Every existing wax type has layerCount 1, so "the outermost
+    // layer" is its ONLY layer — this recomputation is not a 크루아상-only
+    // cost, it's back to exactly what every wax type did before the
+    // 2026-08-07 optimization pass that introduced this bug.
     const coreNormalArray = this.coreGeometry.attributes.normal.array;
     this.fillingGeometry.attributes.normal.array.set(coreNormalArray);
     this.fillingGeometry.attributes.normal.needsUpdate = true;
     for (let k = 0; k < layerCount; k++) {
       const layer = layers[k];
       layer.shellGeometry.attributes.position.needsUpdate = true;
-      layer.shellGeometry.attributes.normal.array.set(coreNormalArray);
+      if (k === 0) {
+        layer.shellGeometry.computeVertexNormals();
+      } else {
+        layer.shellGeometry.attributes.normal.array.set(coreNormalArray);
+      }
       layer.shellGeometry.attributes.normal.needsUpdate = true;
     }
   }

@@ -96,13 +96,25 @@ const IMAGE_BEVEL_SEGMENTS = 8;
 const IMAGE_CORE_DEPTH_RATIO = 0.34;
 
 // How far the flat front/back caps get pushed outward at their most domed
-// point, as a fraction of coreDepth — a subtle "puffy cushion" lift rather
-// than a real hemisphere. Requested after the original perfectly-flat caps
-// both looked too flat and seemed to poke-respond worse than the curved rim
+// point, as a fraction of coreDepth — a "puffy cushion" lift rather than a
+// real hemisphere. Requested after the original perfectly-flat caps both
+// looked too flat and seemed to poke-respond worse than the curved rim
 // (every vertex in a truly flat cap shares the exact same normal, so a poke
 // there reads as a uniform, low-contrast dent instead of an obviously
 // deformed silhouette).
-const CAP_DOME_RATIO = 0.18;
+//
+// Matched to IMAGE_BEVEL_SIZE_RATIO (0.4), not picked independently —
+// an earlier, much smaller value (0.18, under half the bevel's own outward
+// flare) meant the rim puffed out visibly more than the caps did, so even a
+// perfectly pristine, never-poked custom shape read as "rim looks properly
+// round, front/back look comparatively flat/sunken" (2026-08-11/08_Check.md
+// — reproduced with the reset button alone, no poking, regardless of
+// material mode, so neither dent damage nor clay/slime shading was the
+// cause). The bevel's flare is an outward XY push and this dome is an
+// outward Z push — different axes — but from a camera looking roughly at
+// the shape, both read as "how much does this surface bulge toward me", so
+// matching their ratios balances how puffy the cap looks against the rim.
+const CAP_DOME_RATIO = 0.4;
 // Only vertices whose normal is within ~25° of pointing straight along the
 // cap's own axis (|normal.z| above this) get any dome push — this is what
 // keeps the dome fading out to exactly 0 right where the surface starts

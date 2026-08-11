@@ -31859,7 +31859,7 @@ void main() {
   var IMAGE_BEVEL_SIZE_RATIO = 0.4;
   var IMAGE_BEVEL_SEGMENTS = 8;
   var IMAGE_CORE_DEPTH_RATIO = 0.34;
-  var CAP_DOME_RATIO = 0.18;
+  var CAP_DOME_RATIO = 0.4;
   var CAP_FLATNESS_MIN_NORMAL_Z = 0.9;
   function domeFlatCaps(geometry, rawRadius, maxBumpHeight) {
     const pos = geometry.attributes.position;
@@ -32100,9 +32100,7 @@ void main() {
       const shellClearance = baseGeometry.userData.shellClearance ?? new Float32Array(this.vertexCount).fill(Infinity);
       this.localShellThickness = new Float32Array(this.vertexCount);
       for (let v = 0; v < this.vertexCount; v++) {
-        const totalThickness = perLayerThickness * this.layerCount;
-        const clampedTotal = Math.min(totalThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
-        this.localShellThickness[v] = clampedTotal / this.layerCount;
+        this.localShellThickness[v] = Math.min(perLayerThickness, shellClearance[v] * SHELL_CLEARANCE_SAFETY_RATIO);
       }
       const baseNormalAttr = baseGeometry.attributes.normal;
       this.restNormal = new Float32Array(this.vertexCount * 3);
@@ -32123,7 +32121,7 @@ void main() {
       this.restPosition = new Float32Array(this.vertexCount * 3);
       for (let v = 0; v < this.vertexCount; v++) {
         const i3 = v * 3;
-        const t = this.localShellThickness[v] * this.layerCount;
+        const t = this.localShellThickness[v];
         this.restPosition[i3] = baseRestPosition[i3] - this.restNormal[i3] * t;
         this.restPosition[i3 + 1] = baseRestPosition[i3 + 1] - this.restNormal[i3 + 1] * t;
         this.restPosition[i3 + 2] = baseRestPosition[i3 + 2] - this.restNormal[i3 + 2] * t;
@@ -32649,7 +32647,11 @@ void main() {
       for (let k = 0; k < layerCount; k++) {
         const layer = layers[k];
         layer.shellGeometry.attributes.position.needsUpdate = true;
-        layer.shellGeometry.attributes.normal.array.set(coreNormalArray);
+        if (k === 0) {
+          layer.shellGeometry.computeVertexNormals();
+        } else {
+          layer.shellGeometry.attributes.normal.array.set(coreNormalArray);
+        }
         layer.shellGeometry.attributes.normal.needsUpdate = true;
       }
     }
