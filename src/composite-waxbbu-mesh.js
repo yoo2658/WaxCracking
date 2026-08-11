@@ -135,10 +135,19 @@ export class CompositeWaxbbuMesh {
    */
   update(dt) {
     const shellChanged = this.shellDeform.update(dt);
-    this.coreDeform.containmentRadiusPerVertex = this.coreDeform.buildContainmentFromGrid(
-      this.shellDeform.getRadialRadiusGrid(),
-      CONTAINMENT_MARGIN
-    );
+    // Only worth recomputing (getRadialRadiusGrid is a full pass over the
+    // shell's vertices, plus a neighbor-blur pass on top) when the shell's
+    // own live surface actually moved this frame — while idle (nothing
+    // being pressed, no elastic spring-back still settling), it's the exact
+    // same grid as last frame, so skip it and keep using that. Confirmed
+    // this was running on EVERY frame regardless, all the time this shape
+    // has been on screen at all, not just while actively deforming.
+    if (shellChanged) {
+      this.coreDeform.containmentRadiusPerVertex = this.coreDeform.buildContainmentFromGrid(
+        this.shellDeform.getRadialRadiusGrid(),
+        CONTAINMENT_MARGIN
+      );
+    }
     const coreChanged = this.coreDeform.update(dt);
     return shellChanged || coreChanged;
   }

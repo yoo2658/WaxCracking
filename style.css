@@ -203,8 +203,17 @@ html, body {
   pointer-events: auto;
 }
 
-#help-panel p {
+#help-panel .help-title {
+  margin: 0 0 10px;
+  font-weight: 700;
+}
+
+#help-panel .help-list {
   margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .completion-title {

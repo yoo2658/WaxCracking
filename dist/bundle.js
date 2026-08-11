@@ -32046,6 +32046,7 @@ void main() {
   var HOLE_EDGE_JITTER = 0.35;
   var LOW_FRAGMENT_REMAINING_THRESHOLD = 0.15;
   var CLEANUP_REMAINING_THRESHOLD = 0.2;
+  var FINAL_SWEEP_REMAINING_THRESHOLD = 0.05;
   var DeformableMesh = class {
     /**
      * containmentRadiusPerVertex (default null — a no-op for every existing
@@ -32351,10 +32352,21 @@ void main() {
      * there necessarily already is too, making it the correct "truly nothing
      * left to break here" check. For layerCount 1 the outermost and innermost
      * are literally the same one layer, so this is unchanged from before.
+     *
+     * EXCEPT when finalSweep applies (see FINAL_SWEEP_REMAINING_THRESHOLD):
+     * that guard is exactly what a final sweep needs to override — the whole
+     * point is finishing off a stray sliver stranded somewhere OTHER than
+     * wherever the player is currently pressing, so the click point itself
+     * having nothing left to break there can't be a reason to bail out.
+     * Confirmed directly: without this override, pressing anywhere ordinary
+     * while almost done (which is, definitionally, mostly already-broken
+     * ground) tripped this very guard immediately and never even reached the
+     * sweep logic below, leaving the stray sliver stranded forever.
      */
     _checkBreak(pointWorld, normal, nearestIndex, holdSeconds) {
-      if (this.layers[this.layerCount - 1].holeMask[nearestIndex] > 0.5) return null;
       const remainingRatio = this.layerCount > 1 ? this.getRemainingWaxRatio() : 1;
+      const finalSweep = this.layerCount > 1 && remainingRatio > 0 && remainingRatio <= FINAL_SWEEP_REMAINING_THRESHOLD;
+      if (!finalSweep && this.layers[this.layerCount - 1].holeMask[nearestIndex] > 0.5) return null;
       const innermostColor = this.layers[this.layerCount - 1].shellMaterial.userData.waxUniforms.waxColor.value;
       const colors = this.layerCount > 1 && remainingRatio <= LOW_FRAGMENT_REMAINING_THRESHOLD ? [innermostColor] : this.layers.flatMap((layer, k) => {
         const color = layer.shellMaterial.userData.waxUniforms.waxColor.value;
@@ -32365,19 +32377,44 @@ void main() {
         if (holdSeconds < FIRST_BREAK_HOLD_SECONDS) return null;
         this.hasBrokenOnce = true;
         this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
+        if (finalSweep) {
+          this._sweepAllLayersOpen();
+        } else {
+          this.layers.forEach((layer, k) => {
+            const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
+            this._boostHoleAt(layer, pointWorld, normal, holeRadius);
+          });
+        }
+        return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true, colors };
+      }
+      if (!finalSweep && this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
+      this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
+      if (finalSweep) {
+        this._sweepAllLayersOpen();
+      } else {
         this.layers.forEach((layer, k) => {
           const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
           this._boostHoleAt(layer, pointWorld, normal, holeRadius);
         });
-        return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true, colors };
       }
-      if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
-      this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
-      this.layers.forEach((layer, k) => {
-        const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
-        this._boostHoleAt(layer, pointWorld, normal, holeRadius);
-      });
       return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false, colors };
+    }
+    /**
+     * See FINAL_SWEEP_REMAINING_THRESHOLD's own comment — opens every layer's
+     * hole EVERYWHERE at once (not just near the point that just broke),
+     * guaranteeing a multi-layer wax this close to done always finishes
+     * completely on the very next real break, wherever it lands, instead of
+     * possibly leaving some far-away stranded sliver (see
+     * effectiveHoleRadiusMultiplierForLayer's own gap) unreachable by that
+     * break's own local radius.
+     */
+    _sweepAllLayersOpen() {
+      for (const layer of this.layers) {
+        layer.holeMask.fill(1);
+        if (layer._localHoleMask !== layer.holeMask) layer._localHoleMask.fill(1);
+      }
+      this._dirtyPosition = true;
+      this._dirtyAttributes = true;
     }
     /**
      * Shared by _boostCrackAt/_boostHoleAt below, which are otherwise
@@ -32606,11 +32643,14 @@ void main() {
       this.coreGeometry.attributes.position.needsUpdate = true;
       this.fillingGeometry.attributes.position.needsUpdate = true;
       this.coreGeometry.computeVertexNormals();
-      this.fillingGeometry.computeVertexNormals();
+      const coreNormalArray = this.coreGeometry.attributes.normal.array;
+      this.fillingGeometry.attributes.normal.array.set(coreNormalArray);
+      this.fillingGeometry.attributes.normal.needsUpdate = true;
       for (let k = 0; k < layerCount; k++) {
         const layer = layers[k];
         layer.shellGeometry.attributes.position.needsUpdate = true;
-        layer.shellGeometry.computeVertexNormals();
+        layer.shellGeometry.attributes.normal.array.set(coreNormalArray);
+        layer.shellGeometry.attributes.normal.needsUpdate = true;
       }
     }
     /**
@@ -32855,10 +32895,12 @@ void main() {
      */
     update(dt) {
       const shellChanged = this.shellDeform.update(dt);
-      this.coreDeform.containmentRadiusPerVertex = this.coreDeform.buildContainmentFromGrid(
-        this.shellDeform.getRadialRadiusGrid(),
-        CONTAINMENT_MARGIN
-      );
+      if (shellChanged) {
+        this.coreDeform.containmentRadiusPerVertex = this.coreDeform.buildContainmentFromGrid(
+          this.shellDeform.getRadialRadiusGrid(),
+          CONTAINMENT_MARGIN
+        );
+      }
       const coreChanged = this.coreDeform.update(dt);
       return shellChanged || coreChanged;
     }
@@ -33423,20 +33465,18 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   function setShellLook(shellMaterial2, waxType) {
     applyShellLook(shellMaterial2, SHELL_LOOK[waxType] ?? SHELL_LOOK.basic);
   }
-  var CROISSANT_OUTER_LOOK = { waxColor: 11035423, waxRoughnessBase: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.2 };
-  var CROISSANT_INNER_LOOK = { waxColor: 16248016, waxRoughnessBase: 0.6, clearcoat: 0.15, clearcoatRoughness: 0.5 };
-  var croissantColorScratch = new Color();
-  var croissantOuterColor = new Color(CROISSANT_OUTER_LOOK.waxColor);
-  var croissantInnerColor = new Color(CROISSANT_INNER_LOOK.waxColor);
+  var CROISSANT_LAYER_COLORS = [12675626, 14782783, 16307356, 15643750, 16307356];
+  var CROISSANT_GLOSS_OUTER = { waxRoughnessBase: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.2 };
+  var CROISSANT_GLOSS_INNER = { waxRoughnessBase: 0.6, clearcoat: 0.15, clearcoatRoughness: 0.5 };
   function setCroissantLayerLook(shellMaterial2, layerIndex, layerCount) {
     const t = layerCount <= 1 ? 0 : layerIndex / (layerCount - 1);
-    croissantColorScratch.copy(croissantOuterColor).lerp(croissantInnerColor, t);
+    const color = CROISSANT_LAYER_COLORS[layerIndex] ?? CROISSANT_LAYER_COLORS[CROISSANT_LAYER_COLORS.length - 1];
     applyShellLook(shellMaterial2, {
-      waxColor: croissantColorScratch.getHex(),
+      waxColor: color,
       hazeAmount: 0,
-      waxRoughnessBase: MathUtils.lerp(CROISSANT_OUTER_LOOK.waxRoughnessBase, CROISSANT_INNER_LOOK.waxRoughnessBase, t),
-      clearcoat: MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoat, CROISSANT_INNER_LOOK.clearcoat, t),
-      clearcoatRoughness: MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoatRoughness, CROISSANT_INNER_LOOK.clearcoatRoughness, t),
+      waxRoughnessBase: MathUtils.lerp(CROISSANT_GLOSS_OUTER.waxRoughnessBase, CROISSANT_GLOSS_INNER.waxRoughnessBase, t),
+      clearcoat: MathUtils.lerp(CROISSANT_GLOSS_OUTER.clearcoat, CROISSANT_GLOSS_INNER.clearcoat, t),
+      clearcoatRoughness: MathUtils.lerp(CROISSANT_GLOSS_OUTER.clearcoatRoughness, CROISSANT_GLOSS_INNER.clearcoatRoughness, t),
       sparkleAmount: 0
     });
   }

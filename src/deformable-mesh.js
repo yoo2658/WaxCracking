@@ -296,6 +296,24 @@ const LOW_FRAGMENT_REMAINING_THRESHOLD = 0.15;
 // presses still have plenty of nearby fresh material to reach normally.
 const CLEANUP_REMAINING_THRESHOLD = 0.2;
 
+// 크루아상 only (a no-op for layerCount 1). CLEANUP_REMAINING_THRESHOLD's
+// own radius-widening still isn't a GUARANTEE — it only helps a break that
+// actually lands near a stranded sliver, and a sliver can end up anywhere
+// on the whole shape, not necessarily wherever the player happens to be
+// clicking next. Confirmed directly: even with that fix active, hammering
+// broadly for a long time still left a handful of vertices (concentrated
+// in the innermost 1-2 layers specifically, matching the mechanism exactly)
+// stuck below display-rounds-to-0%, so pressing "anywhere" didn't always
+// finish it off, and the few still-real breaks that DID land nearby enough
+// read as "파편이 조금씩 계속 나온다"/"어딜 눌러도 안 떨어지는 조각이 있다".
+// Below this (much lower) threshold, the NEXT valid break — wherever it
+// lands — sweeps EVERY layer open EVERYWHERE at once (see
+// _sweepAllLayersOpen), not just its own local footprint: once this close
+// to done, one more real hit anywhere finishes the whole thing outright,
+// so no scattered leftover sliver can ever survive to be display-"0%"
+// while something genuinely still remains.
+const FINAL_SWEEP_REMAINING_THRESHOLD = 0.05;
+
 /**
  * Owns two welded, indexed, vertex-corresponding geometries built from the
  * same base shape:
@@ -897,14 +915,31 @@ export class DeformableMesh {
    * there necessarily already is too, making it the correct "truly nothing
    * left to break here" check. For layerCount 1 the outermost and innermost
    * are literally the same one layer, so this is unchanged from before.
+   *
+   * EXCEPT when finalSweep applies (see FINAL_SWEEP_REMAINING_THRESHOLD):
+   * that guard is exactly what a final sweep needs to override — the whole
+   * point is finishing off a stray sliver stranded somewhere OTHER than
+   * wherever the player is currently pressing, so the click point itself
+   * having nothing left to break there can't be a reason to bail out.
+   * Confirmed directly: without this override, pressing anywhere ordinary
+   * while almost done (which is, definitionally, mostly already-broken
+   * ground) tripped this very guard immediately and never even reached the
+   * sweep logic below, leaving the stray sliver stranded forever.
    */
   _checkBreak(pointWorld, normal, nearestIndex, holdSeconds) {
-    if (this.layers[this.layerCount - 1].holeMask[nearestIndex] > 0.5) return null;
     // Computed once (only for 크루아상 — every other type never needs it
-    // here) and reused below both for the low-remaining fragment color AND
-    // the low-remaining hole-radius cleanup boost, instead of calling
-    // getRemainingWaxRatio() twice over.
+    // here) and reused below for the low-remaining fragment color, the
+    // low-remaining hole-radius cleanup boost, AND the final-sweep check,
+    // instead of calling getRemainingWaxRatio() three times over.
     const remainingRatio = this.layerCount > 1 ? this.getRemainingWaxRatio() : 1;
+    // See FINAL_SWEEP_REMAINING_THRESHOLD's own comment — once this close
+    // to done, the break about to happen (either branch below) clears
+    // EVERYTHING at once instead of just its own local footprint, and can
+    // fire from a press ANYWHERE, not just one that lands on still-live
+    // material (see this method's own doc comment on the guard below).
+    const finalSweep = this.layerCount > 1 && remainingRatio > 0 && remainingRatio <= FINAL_SWEEP_REMAINING_THRESHOLD;
+
+    if (!finalSweep && this.layers[this.layerCount - 1].holeMask[nearestIndex] > 0.5) return null;
 
     // Every layer pops loose AT ONCE on a break (see below) — the caller
     // spawns one fragment per entry here, all in the same burst, so each
@@ -939,20 +974,50 @@ export class DeformableMesh {
       // so the wax reads as "it just cracked all over" rather than "a huge
       // chunk of it vanished".
       this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * FIRST_BREAK_CRACK_SPREAD_MULTIPLIER);
+      if (finalSweep) {
+        this._sweepAllLayersOpen();
+      } else {
+        this.layers.forEach((layer, k) => {
+          const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
+          this._boostHoleAt(layer, pointWorld, normal, holeRadius);
+        });
+      }
+      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true, colors };
+    }
+
+    // Same override as the guard above — a final sweep must be able to fire
+    // from a fresh press that hasn't built up any crackDamage of its own
+    // yet at this exact (already-broken) spot; requiring that would defeat
+    // the whole point.
+    if (!finalSweep && this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
+    this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
+    if (finalSweep) {
+      this._sweepAllLayersOpen();
+    } else {
       this.layers.forEach((layer, k) => {
         const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
         this._boostHoleAt(layer, pointWorld, normal, holeRadius);
       });
-      return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: true, colors };
     }
-
-    if (this.crackDamage[nearestIndex] < BREAK_DAMAGE_THRESHOLD) return null;
-    this._boostCrackAt(pointWorld, normal, influenceRadius * HOLE_RADIUS_RATIO * REGULAR_BREAK_CRACK_SPREAD_MULTIPLIER);
-    this.layers.forEach((layer, k) => {
-      const holeRadius = influenceRadius * HOLE_RADIUS_RATIO * effectiveHoleRadiusMultiplierForLayer(k, this.layerCount, remainingRatio);
-      this._boostHoleAt(layer, pointWorld, normal, holeRadius);
-    });
     return { point: pointWorld.clone(), radius: influenceRadius * FRAGMENT_RADIUS_RATIO, isFirstBreak: false, colors };
+  }
+
+  /**
+   * See FINAL_SWEEP_REMAINING_THRESHOLD's own comment — opens every layer's
+   * hole EVERYWHERE at once (not just near the point that just broke),
+   * guaranteeing a multi-layer wax this close to done always finishes
+   * completely on the very next real break, wherever it lands, instead of
+   * possibly leaving some far-away stranded sliver (see
+   * effectiveHoleRadiusMultiplierForLayer's own gap) unreachable by that
+   * break's own local radius.
+   */
+  _sweepAllLayersOpen() {
+    for (const layer of this.layers) {
+      layer.holeMask.fill(1);
+      if (layer._localHoleMask !== layer.holeMask) layer._localHoleMask.fill(1);
+    }
+    this._dirtyPosition = true;
+    this._dirtyAttributes = true;
   }
 
   /**
@@ -1230,11 +1295,27 @@ export class DeformableMesh {
     this.coreGeometry.attributes.position.needsUpdate = true;
     this.fillingGeometry.attributes.position.needsUpdate = true;
     this.coreGeometry.computeVertexNormals();
-    this.fillingGeometry.computeVertexNormals();
+
+    // Filling and every shell layer share the CORE's exact topology, offset
+    // outward/inward from it by a small constant gap along each vertex's
+    // OWN rest normal — geometrically, that means their true surface normal
+    // is always extremely close to the core's own at that same vertex (a
+    // thin coating barely bends the surface it's wrapped around). Reusing
+    // the core's own just-computed normals here — a cheap array copy — for
+    // all of them instead of running computeVertexNormals() again per
+    // layer (each one an O(vertex count) pass in its own right) cuts what
+    // used to be 3-7 full recomputes down to 1 real one, with no visible
+    // difference (see 2026-08-07's optimization pass — reported lag with
+    // 크루아상's 5 extra shell layers in particular, which used to mean 7
+    // separate full recomputes every single deforming frame).
+    const coreNormalArray = this.coreGeometry.attributes.normal.array;
+    this.fillingGeometry.attributes.normal.array.set(coreNormalArray);
+    this.fillingGeometry.attributes.normal.needsUpdate = true;
     for (let k = 0; k < layerCount; k++) {
       const layer = layers[k];
       layer.shellGeometry.attributes.position.needsUpdate = true;
-      layer.shellGeometry.computeVertexNormals();
+      layer.shellGeometry.attributes.normal.array.set(coreNormalArray);
+      layer.shellGeometry.attributes.normal.needsUpdate = true;
     }
   }
 

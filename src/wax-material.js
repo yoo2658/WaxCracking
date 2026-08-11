@@ -373,42 +373,40 @@ export function setShellLook(shellMaterial, waxType) {
   applyShellLook(shellMaterial, SHELL_LOOK[waxType] ?? SHELL_LOOK.basic);
 }
 
-// 크루아상's two ENDPOINT looks — a real crusty golden-brown outside, easing
-// into a paler, softer dough right against the core. Every one of
-// 크루아상's actual layers (however many there are — see
-// deformable-mesh.js's layerCount) gets an evenly-interpolated step between
-// these two, computed fresh below rather than hand-picked per layer, so
-// changing the LAYER COUNT alone (main.js) automatically re-spaces the
-// gradient across however many steps that is, and adjusting either endpoint
-// here reshapes every layer's color/gloss consistently instead of needing
-// each one hand-edited. Same opaque-coating structure as chocolate/butter
-// (hazeAmount 0 — a thick multi-layer coating like this should read as fully
-// opaque, only showing what's inside once actually broken through, not
-// hazy).
-const CROISSANT_OUTER_LOOK = { waxColor: 0xa8631f, waxRoughnessBase: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.2 };
-const CROISSANT_INNER_LOOK = { waxColor: 0xf7ecd0, waxRoughnessBase: 0.6, clearcoat: 0.15, clearcoatRoughness: 0.5 };
-const croissantColorScratch = new THREE.Color();
-const croissantOuterColor = new THREE.Color(CROISSANT_OUTER_LOOK.waxColor);
-const croissantInnerColor = new THREE.Color(CROISSANT_INNER_LOOK.waxColor);
+// 크루아상's own per-layer colors, index 0 = outermost — explicitly picked
+// per layer (not a computed 2-endpoint gradient like an earlier version
+// used — the requested palette isn't monotonic light-to-dark; the 3rd and
+// 5th layers share the exact same color, which a straight lerp couldn't
+// reproduce). Must have exactly as many entries as main.js's
+// CROISSANT_LAYER_COUNT — see setCroissantLayerLook's own fallback for what
+// happens otherwise. Gloss stays gradient-interpolated outer→inner
+// (crustier reads glossier, doughier reads more matte), independent of
+// this fixed color list — only the colors themselves were specified as a
+// fixed palette. Same opaque-coating structure as chocolate/butter
+// (hazeAmount 0 — a thick multi-layer coating like this should read as
+// fully opaque, only showing what's inside once actually broken through,
+// not hazy).
+const CROISSANT_LAYER_COLORS = [0xc16a2a, 0xe1913f, 0xf8d49c, 0xeeb466, 0xf8d49c];
+const CROISSANT_GLOSS_OUTER = { waxRoughnessBase: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.2 };
+const CROISSANT_GLOSS_INNER = { waxRoughnessBase: 0.6, clearcoat: 0.15, clearcoatRoughness: 0.5 };
 
 /**
- * Applies layer `layerIndex`'s (0 = outermost) own step of the crust→dough
- * gradient to one of 크루아상's shell materials — color AND gloss both
- * interpolated together (a crusty layer should look glossier, a doughy one
- * more matte, not just a different flat color) — see
- * CROISSANT_OUTER_LOOK/INNER_LOOK's own comment. layerCount 1 collapses to
- * the outer look outright (t=0) — never actually hit in practice (크루아상
- * always has more than one layer) but avoids a divide-by-zero.
+ * Applies layer `layerIndex`'s (0 = outermost) own fixed color
+ * (CROISSANT_LAYER_COLORS) plus its own step of the crust→dough gloss
+ * gradient to one of 크루아상's shell materials. Falls back to the last
+ * listed color for any layer index past the end of the list, so a
+ * layerCount bump in main.js without a matching color added here degrades
+ * gracefully (repeats the last color) instead of crashing.
  */
 export function setCroissantLayerLook(shellMaterial, layerIndex, layerCount) {
   const t = layerCount <= 1 ? 0 : layerIndex / (layerCount - 1);
-  croissantColorScratch.copy(croissantOuterColor).lerp(croissantInnerColor, t);
+  const color = CROISSANT_LAYER_COLORS[layerIndex] ?? CROISSANT_LAYER_COLORS[CROISSANT_LAYER_COLORS.length - 1];
   applyShellLook(shellMaterial, {
-    waxColor: croissantColorScratch.getHex(),
+    waxColor: color,
     hazeAmount: 0,
-    waxRoughnessBase: THREE.MathUtils.lerp(CROISSANT_OUTER_LOOK.waxRoughnessBase, CROISSANT_INNER_LOOK.waxRoughnessBase, t),
-    clearcoat: THREE.MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoat, CROISSANT_INNER_LOOK.clearcoat, t),
-    clearcoatRoughness: THREE.MathUtils.lerp(CROISSANT_OUTER_LOOK.clearcoatRoughness, CROISSANT_INNER_LOOK.clearcoatRoughness, t),
+    waxRoughnessBase: THREE.MathUtils.lerp(CROISSANT_GLOSS_OUTER.waxRoughnessBase, CROISSANT_GLOSS_INNER.waxRoughnessBase, t),
+    clearcoat: THREE.MathUtils.lerp(CROISSANT_GLOSS_OUTER.clearcoat, CROISSANT_GLOSS_INNER.clearcoat, t),
+    clearcoatRoughness: THREE.MathUtils.lerp(CROISSANT_GLOSS_OUTER.clearcoatRoughness, CROISSANT_GLOSS_INNER.clearcoatRoughness, t),
     sparkleAmount: 0,
   });
 }
