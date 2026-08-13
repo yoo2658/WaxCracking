@@ -162,12 +162,21 @@ ${NOISE}
 // hole/fragment/wide crack burst (deformable-mesh.js's _checkBreak), not the
 // crack line's visibility itself.
 export const SHELL_FRAGMENT_COLOR = `#include <color_fragment>
-vec2 waxVoronoiSample = waxVoronoi(vObjectPosition * crackCellFrequency);
-float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
-
-float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
-float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
-float crack = crackLine * crackSpread * (1.0 - vHoleMask) * crackVisible;
+// crackVisible is a UNIFORM (same for the whole draw call, not per-fragment
+// — 0 only for "왁뿌볼"'s outer shell, SHELL_LOOK.waxbbuShell) — a real
+// branch here lets the GPU skip this 27-iteration Voronoi call outright for
+// that shell instead of computing it on every fragment and multiplying the
+// result by 0 (2026-08-11/21_Check.md). Since 왁뿌볼's outer bubble stays on
+// screen the whole time that mode is active, this was a standing cost paid
+// for an effect that shell never actually shows.
+float crack = 0.0;
+if (crackVisible > 0.5) {
+  vec2 waxVoronoiSample = waxVoronoi(vObjectPosition * crackCellFrequency);
+  float edgeDist = waxVoronoiSample.y - waxVoronoiSample.x;
+  float crackLine = 1.0 - smoothstep(0.0, 0.09, edgeDist);
+  float crackSpread = smoothstep(0.0, 0.3, vCrackDamage);
+  crack = crackLine * crackSpread * (1.0 - vHoleMask);
+}
 
 vec2 hazeUv = clamp(vObjectPosition.xy / projectionScale * 0.5 + 0.5, 0.0, 1.0);
 vec4 hazeSample = texture2D(coreMap, hazeUv);
@@ -189,31 +198,39 @@ vec3 hazyWax = mix(waxColor, hazeColor, haze);
 // depth, and its alpha drops hard — a real split, not a tint.
 diffuseColor.rgb = mix(hazyWax, hazeColor, crack) * mix(1.0, 0.85, crack);
 
-// Granular sparkle (sand wax type only — sparkleAmount is 0 for every other
-// type, so all of this is a no-op elsewhere). A grain grid much finer than
-// the crack network, built from the same jittered-feature Voronoi as the
-// crack lines (waxVoronoiCell) so grains read as organic blobs, not an
-// axis-aligned grid. grainHeight (reused below, in the normal chunk, to
-// actually bump the shading normal — not just tint color) peaks at 1 in the
-// middle of each grain and falls to 0 at its edge, like a scattered pile of
-// granules stuck to the surface. A small minority of grains additionally
-// hash to a randomly-hued fleck — a fixed per-grain property, not view-gated
-// (real mica flecks read as colorful under any lighting). What DOES change
-// with view/light angle is how much those same grains actually catch the
-// light: SHELL_FRAGMENT_ROUGHNESS (below) drops roughness sharply on exactly
-// those texels, so the real per-pixel PBR specular pass produces the moving
-// "sparkle", not a hand-rolled facing term here.
-vec4 grainSample = waxVoronoiCell(vObjectPosition * 30.0);
-float grainHeight = 1.0 - clamp(grainSample.w, 0.0, 1.0);
-vec3 grainHash = waxHash3(grainSample.xyz);
-float isGlintGrain = step(0.94, grainHash.x); // ~6% of grains
-vec3 glintHue = 0.5 + 0.5 * cos(6.28318 * (grainHash.z + vec3(0.0, 0.33, 0.67)));
-float sparkleGlint = isGlintGrain * sparkleAmount;
-diffuseColor.rgb = mix(diffuseColor.rgb, glintHue, sparkleGlint * 0.55);
-// Grain bumps also read very slightly darker/lighter by height even where
-// they're not a colored glint, so the granular texture still shows under
-// flat lighting, not just wherever a light happens to catch a bump.
-diffuseColor.rgb *= mix(1.0, 0.92 + 0.16 * grainHeight, sparkleAmount);
+// Granular sparkle (sand wax type only — sparkleAmount is a uniform, 0 for
+// every other type). Same real-branch skip as crackVisible above: the other
+// seven wax types were paying this 27-iteration Voronoi call every fragment
+// for a result that only ever got multiplied by 0 (2026-08-11/21_Check.md).
+// A grain grid much finer than the crack network, built from the same
+// jittered-feature Voronoi as the crack lines (waxVoronoiCell) so grains
+// read as organic blobs, not an axis-aligned grid. grainHeight (reused
+// below, in the normal chunk, to actually bump the shading normal — not just
+// tint color; declared here even when sparkleAmount is 0 so that chunk still
+// compiles, just stays 0) peaks at 1 in the middle of each grain and falls to
+// 0 at its edge, like a scattered pile of granules stuck to the surface. A
+// small minority of grains additionally hash to a randomly-hued fleck — a
+// fixed per-grain property, not view-gated (real mica flecks read as
+// colorful under any lighting). What DOES change with view/light angle is
+// how much those same grains actually catch the light: SHELL_FRAGMENT_ROUGHNESS
+// (below) drops roughness sharply on exactly those texels, so the real
+// per-pixel PBR specular pass produces the moving "sparkle", not a
+// hand-rolled facing term here.
+float grainHeight = 0.0;
+float sparkleGlint = 0.0;
+if (sparkleAmount > 0.0) {
+  vec4 grainSample = waxVoronoiCell(vObjectPosition * 30.0);
+  grainHeight = 1.0 - clamp(grainSample.w, 0.0, 1.0);
+  vec3 grainHash = waxHash3(grainSample.xyz);
+  float isGlintGrain = step(0.94, grainHash.x); // ~6% of grains
+  vec3 glintHue = 0.5 + 0.5 * cos(6.28318 * (grainHash.z + vec3(0.0, 0.33, 0.67)));
+  sparkleGlint = isGlintGrain * sparkleAmount;
+  diffuseColor.rgb = mix(diffuseColor.rgb, glintHue, sparkleGlint * 0.55);
+  // Grain bumps also read very slightly darker/lighter by height even where
+  // they're not a colored glint, so the granular texture still shows under
+  // flat lighting, not just wherever a light happens to catch a bump.
+  diffuseColor.rgb *= mix(1.0, 0.92 + 0.16 * grainHeight, sparkleAmount);
+}
 
 // Multiplied by the material's own opacity uniform (already in scope from
 // the standard common/color_fragment chunks re-included above) — without
@@ -224,18 +241,23 @@ diffuseColor.rgb *= mix(1.0, 0.92 + 0.16 * grainHeight, sparkleAmount);
 diffuseColor.a = (1.0 - crack * 0.9) * opacity;
 
 // 클레이/슬라임 only (crackVisible is 0 for waxbbuShell, making this a no-op
-// there — that shell never shows any of this, by design). Reuses the SAME
-// Voronoi cell partition the crack lines above already draw (same
-// crackCellFrequency) — hashes each cell's own identity to a fixed threshold
-// in 0..1, and discards that WHOLE cell (revealing the — already opaque —
-// core straight through, exactly like a real local break already does)
-// once OVERALL remaining wax crosses it, regardless of whether THIS spot
-// was ever actually clicked. Higher overall damage -> more scattered cells
-// across the WHOLE shell have crossed their own threshold, reading as wax
-// visibly flaking away everywhere, not just where you're pressing.
-vec4 shellCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
-float shellCellThreshold = waxHash3(shellCell.xyz).y;
-bool shellCellRevealed = shellCellThreshold < shellCellRevealProgress && crackVisible > 0.5;
+// there — that shell never shows any of this, by design — so the same
+// real-branch skip as above saves this 27-iteration Voronoi call too for
+// that shell specifically). Reuses the SAME Voronoi cell partition the
+// crack lines above already draw (same crackCellFrequency) — hashes each
+// cell's own identity to a fixed threshold in 0..1, and discards that WHOLE
+// cell (revealing the — already opaque — core straight through, exactly
+// like a real local break already does) once OVERALL remaining wax crosses
+// it, regardless of whether THIS spot was ever actually clicked. Higher
+// overall damage -> more scattered cells across the WHOLE shell have
+// crossed their own threshold, reading as wax visibly flaking away
+// everywhere, not just where you're pressing.
+bool shellCellRevealed = false;
+if (crackVisible > 0.5) {
+  vec4 shellCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
+  float shellCellThreshold = waxHash3(shellCell.xyz).y;
+  shellCellRevealed = shellCellThreshold < shellCellRevealProgress;
+}
 
 if ((vHoleMask > 0.5 && crackVisible > 0.5) || shellCellRevealed) discard;
 `;
@@ -324,9 +346,13 @@ vec4 coreSample = texture2D(coreMap, coreUv);
 // out of scope here), but far less visually jarring.
 vec3 photoColor = mix(vec3(0.85, 0.79, 0.68), coreSample.rgb, coreSample.a);
 
-// "왁뿌볼" only (innerCrackVisible is 0 everywhere else, making all of this a
-// no-op and leaving photoColor as the final result exactly as before): the
-// wax keeps the user's own photo/color — it grows the same style of Voronoi
+// "왁뿌볼" only (innerCrackVisible is a UNIFORM, 0 everywhere else) — a real
+// branch here skips BOTH 27-iteration Voronoi calls below entirely for
+// clay/slime/크루아상's core, instead of always computing them and
+// multiplying the result away (2026-08-11/21_Check.md). That core becomes
+// visible on every broken-open pixel for every wax type, so this was a real,
+// non-trivial standing cost for an effect only 왁뿌볼 ever shows. The wax
+// keeps the user's own photo/color — it grows the same style of Voronoi
 // crack-line network the shell normally shows (see SHELL_FRAGMENT_COLOR),
 // darkening that same color rather than alpha-gapping it, since there's
 // nothing further inside to reveal through a growing crack (yet — see
@@ -335,17 +361,11 @@ vec3 photoColor = mix(vec3(0.85, 0.79, 0.68), coreSample.rgb, coreSample.a);
 // to discard at), this DOES discard for real: that's a genuine hole, not a
 // tint, revealing DeformableMesh's fillingMesh (a plain white solid layer
 // just inside the core) rather than empty space.
-vec2 innerVoronoi = waxVoronoi(vObjectPosition * crackCellFrequency);
-float innerCrackLine = 1.0 - smoothstep(0.0, 0.09, innerVoronoi.y - innerVoronoi.x);
-float innerCrackSpread = smoothstep(0.0, 0.3, vCrackDamage);
-float innerCrack = innerCrackLine * innerCrackSpread * (1.0 - vHoleMask) * innerCrackVisible;
-
-vec3 baseWax = mix(photoColor, photoColor * 0.7, innerCrack);
-
-// "왁뿌볼" only, and GLOBAL rather than local (cellRevealProgress tracks
-// overall remaining wax, not this vertex's own click damage) — "왁스가 점점
-// 투명해지는 게 아니라 (실제 앱처럼) 조각이 통째로 사라지는" way: reuses the
-// SAME Voronoi cell partition the crack lines already draw (same
+//
+// The second half — GLOBAL rather than local (cellRevealProgress tracks
+// overall remaining wax, not this vertex's own click damage) — is "왁스가
+// 점점 투명해지는 게 아니라 (실제 앱처럼) 조각이 통째로 사라지는" way: reuses
+// the SAME Voronoi cell partition the crack lines above already draw (same
 // crackCellFrequency), hashes each cell's own identity to a fixed, evenly-
 // spread threshold in 0..1, and swaps that WHOLE cell over to
 // cellRevealColor (the filling's own current color, kept in sync from
@@ -354,9 +374,19 @@ vec3 baseWax = mix(photoColor, photoColor * 0.7, innerCrack);
 // randomly-scattered fraction of them) have crossed their own threshold,
 // so what's left reads as fewer, smaller surviving islands of wax — not a
 // uniform color fade.
-vec4 innerCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
-float cellThreshold = waxHash3(innerCell.xyz).y;
-float cellRevealed = step(cellThreshold, cellRevealProgress) * innerCrackVisible;
+vec3 baseWax = photoColor;
+float cellRevealed = 0.0;
+if (innerCrackVisible > 0.5) {
+  vec2 innerVoronoi = waxVoronoi(vObjectPosition * crackCellFrequency);
+  float innerCrackLine = 1.0 - smoothstep(0.0, 0.09, innerVoronoi.y - innerVoronoi.x);
+  float innerCrackSpread = smoothstep(0.0, 0.3, vCrackDamage);
+  float innerCrack = innerCrackLine * innerCrackSpread * (1.0 - vHoleMask);
+  baseWax = mix(photoColor, photoColor * 0.7, innerCrack);
+
+  vec4 innerCell = waxVoronoiCell(vObjectPosition * crackCellFrequency);
+  float cellThreshold = waxHash3(innerCell.xyz).y;
+  cellRevealed = step(cellThreshold, cellRevealProgress);
+}
 diffuseColor.rgb = mix(baseWax, cellRevealColor, cellRevealed);
 
 if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
