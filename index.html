@@ -9,7 +9,10 @@
 <body>
   <canvas id="scene-canvas"></canvas>
 
-  <div id="wax-progress" aria-hidden="true">남은 왁스 <span id="wax-progress-value">100</span>%</div>
+  <div id="wax-progress" aria-hidden="true">
+    <div>남은 왁스 <span id="wax-progress-value">100.0</span>%</div>
+    <div id="daily-break-count">오늘 부순 왁스 <span id="daily-break-count-value">0</span>개</div>
+  </div>
 
   <div id="completion-banner" role="status" aria-live="polite">
     <button type="button" id="completion-close" aria-label="닫기">✕</button>
@@ -37,6 +40,12 @@
           <button type="button" data-value="clay" class="active">클레이</button>
           <button type="button" data-value="slime">슬라임</button>
           <button type="button" data-value="waxbbu">왁뿌볼</button>
+        </div>
+      </section>
+
+      <section>
+        <div class="button-row">
+          <button type="button" id="random-wax-button">랜덤 왁뿌 🎲</button>
         </div>
       </section>
 

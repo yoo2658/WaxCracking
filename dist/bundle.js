@@ -33900,14 +33900,15 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     onPhotoRemove,
     onReset,
     onVolumeChange,
-    onThemeChange
+    onThemeChange,
+    onRandomWax
   }) {
     wireButtonGroup("waxType", onWaxTypeChange);
-    const waxTypeSection = document.getElementById("wax-type-section");
     wireButtonGroup("material", (mode) => {
-      waxTypeSection.style.display = mode === "waxbbu" ? "none" : "";
+      setWaxTypeSectionVisible(mode !== "waxbbu");
       onMaterialChange(mode);
     });
+    document.getElementById("random-wax-button").addEventListener("click", () => onRandomWax?.());
     wireButtonGroup("theme", (theme) => {
       document.documentElement.dataset.theme = theme;
       onThemeChange?.(theme);
@@ -33978,9 +33979,22 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       toastTimeoutId = null;
     }, TOAST_DURATION_MS);
   }
+  function setColorPickerValue(hex) {
+    document.getElementById("color-picker").value = hex;
+  }
+  function setWaxTypeSectionVisible(visible) {
+    document.getElementById("wax-type-section").style.display = visible ? "" : "none";
+  }
+  function setActiveButton(groupName, value) {
+    const buttons = document.querySelectorAll(`[data-group="${groupName}"] button`);
+    buttons.forEach((b) => b.classList.toggle("active", b.dataset.value === value));
+  }
   function updateWaxProgress(ratio) {
     const value = document.getElementById("wax-progress-value");
-    value.textContent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
+    value.textContent = (Math.max(0, Math.min(1, ratio)) * 100).toFixed(1);
+  }
+  function updateDailyBreakCount(count) {
+    document.getElementById("daily-break-count-value").textContent = count;
   }
   function hideCompletionBanner() {
     document.getElementById("completion-banner").classList.remove("visible");
@@ -34017,6 +34031,71 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       changed = true;
     }
     return changed;
+  }
+
+  // src/random-wax.js
+  var WAX_TYPES = ["basic", "chocolate", "sand", "butter", "strawberry", "grape", "milk", "croissant"];
+  var PASTEL_SATURATION_RANGE = [0.45, 0.65];
+  var PASTEL_LIGHTNESS_RANGE = [0.78, 0.88];
+  function randomInRange([min, max]) {
+    return min + Math.random() * (max - min);
+  }
+  function hslToHex(h, s, l) {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(h / 60 % 2 - 1));
+    const m = l - c / 2;
+    let r, g, b;
+    if (h < 60) [r, g, b] = [c, x, 0];
+    else if (h < 120) [r, g, b] = [x, c, 0];
+    else if (h < 180) [r, g, b] = [0, c, x];
+    else if (h < 240) [r, g, b] = [0, x, c];
+    else if (h < 300) [r, g, b] = [x, 0, c];
+    else [r, g, b] = [c, 0, x];
+    const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+  function randomPastelColor() {
+    const hue = Math.floor(Math.random() * 360);
+    return hslToHex(hue, randomInRange(PASTEL_SATURATION_RANGE), randomInRange(PASTEL_LIGHTNESS_RANGE));
+  }
+  function randomWaxType() {
+    return WAX_TYPES[Math.floor(Math.random() * WAX_TYPES.length)];
+  }
+
+  // src/daily-count.js
+  var STORAGE_KEY = "waxcracking:dailyBreakCount";
+  function todayKey() {
+    const d = /* @__PURE__ */ new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${mm}-${dd}`;
+  }
+  function readStored() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.count === "number" && typeof parsed.date === "string") return parsed;
+    } catch {
+    }
+    return null;
+  }
+  function writeStored(state) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch {
+    }
+  }
+  function getTodayBreakCount() {
+    const stored = readStored();
+    return stored && stored.date === todayKey() ? stored.count : 0;
+  }
+  function recordBreak() {
+    const today = todayKey();
+    const stored = readStored();
+    const count = (stored && stored.date === today ? stored.count : 0) + 1;
+    writeStored({ date: today, count });
+    return count;
   }
 
   // src/main.js
@@ -34147,42 +34226,71 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   function requestRender() {
     needsExtraRender = true;
   }
+  function applyColorChange(hex) {
+    currentColorHex = hex;
+    usingPhotoTexture = false;
+    setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
+    requestRender();
+  }
+  function applyWaxTypeChange(waxType) {
+    const layeredChanged = waxType === "croissant" !== (currentWaxType === "croissant");
+    currentWaxType = waxType;
+    setShellLook(shellMaterial, waxType);
+    if (layeredChanged) {
+      rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+    }
+    requestRender();
+  }
+  function applyMaterialChange(mode) {
+    const modeChanged = mode !== currentMaterialMode;
+    const structureChanged = modeChanged && (isCustomShape || currentWaxType === "croissant");
+    currentMaterialMode = mode;
+    setCoreMaterialMode(coreMaterial, mode);
+    setShellLook(shellMaterial, mode === "waxbbu" ? "waxbbuShell" : currentWaxType);
+    if (structureChanged) {
+      rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+    } else {
+      deformable.setMaterialMode(mode);
+      syncFillingVisibility();
+      if (modeChanged) {
+        deformable.reset();
+        fragments.reset();
+        shortTapCount = 0;
+        startNewWaxTracking();
+      }
+    }
+    requestRender();
+  }
+  var RANDOM_MATERIAL_MODES = ["clay", "slime", "waxbbu"];
   var { initialColor } = initUI({
-    onWaxTypeChange: (waxType) => {
-      const layeredChanged = waxType === "croissant" !== (currentWaxType === "croissant");
-      currentWaxType = waxType;
-      setShellLook(shellMaterial, waxType);
-      if (layeredChanged) {
-        rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+    onWaxTypeChange: applyWaxTypeChange,
+    onMaterialChange: applyMaterialChange,
+    // 재질/왁스종류/색을 전부 새로 뽑아 한 번에 적용 — 사진이 등록된 상태라면
+    // (usingPhotoTexture) 색은 그대로 두고 재질/종류만 랜덤. 실제 적용은 위
+    // applyWaxTypeChange/applyMaterialChange를 그대로 재사용하고, 버튼 클릭
+    // 없이 프로그램적으로 값을 바꾸는 거라 어느 버튼이 실제로 선택됐는지도
+    // main.js가 직접 표시해줘야 함(setActiveButton) — wireButtonGroup은 실제
+    // 클릭에만 반응하므로 이 경로에선 자동으로 안 따라옴.
+    onRandomWax: () => {
+      const material = RANDOM_MATERIAL_MODES[Math.floor(Math.random() * RANDOM_MATERIAL_MODES.length)];
+      const waxType = randomWaxType();
+      if (!usingPhotoTexture) {
+        const color = randomPastelColor();
+        setColorPickerValue(color);
+        applyColorChange(color);
       }
+      applyWaxTypeChange(waxType);
+      applyMaterialChange(material);
+      setActiveButton("waxType", waxType);
+      setActiveButton("material", material);
+      setWaxTypeSectionVisible(material !== "waxbbu");
+      deformable.reset();
+      fragments.reset();
+      shortTapCount = 0;
+      startNewWaxTracking();
       requestRender();
     },
-    onMaterialChange: (mode) => {
-      const modeChanged = mode !== currentMaterialMode;
-      const structureChanged = modeChanged && (isCustomShape || currentWaxType === "croissant");
-      currentMaterialMode = mode;
-      setCoreMaterialMode(coreMaterial, mode);
-      setShellLook(shellMaterial, mode === "waxbbu" ? "waxbbuShell" : currentWaxType);
-      if (structureChanged) {
-        rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
-      } else {
-        deformable.setMaterialMode(mode);
-        syncFillingVisibility();
-        if (modeChanged) {
-          deformable.reset();
-          fragments.reset();
-          shortTapCount = 0;
-          startNewWaxTracking();
-        }
-      }
-      requestRender();
-    },
-    onColorChange: (hex) => {
-      currentColorHex = hex;
-      usingPhotoTexture = false;
-      setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
-      requestRender();
-    },
+    onColorChange: applyColorChange,
     onPhotoChange: async (file) => {
       const { texture, silhouette } = await loadPhotoTexture(file);
       usingPhotoTexture = true;
@@ -34221,6 +34329,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   });
   currentColorHex = initialColor;
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
+  updateDailyBreakCount(getTodayBreakCount());
   var lastTime = performance.now();
   var animationFrameId = null;
   function tick() {
@@ -34241,6 +34350,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {
         completionShown = true;
         showCompletionBanner((now - waxStartTime) / 1e3, clickCount);
+        updateDailyBreakCount(recordBreak());
       }
     }
     const fragmentsAnimating = fragments.update(dt);

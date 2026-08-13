@@ -106,6 +106,15 @@ html, body {
   transition: background 0.2s ease, color 0.2s ease;
 }
 
+/* 오늘 부순 개수 — 남은 % 아랫줄, 덜 강조되게 살짝 작고 옅게. 브라우저
+   localStorage에만 남는 기록(daily-count.js)이라 서버 없이도 동작. */
+#daily-break-count {
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
 /* A one-off celebratory summary once a wax drops to <=10% remaining —
    centered and bigger than #toast since it's a payoff moment, not a passing
    hint. Stays up until explicitly closed (see #completion-close) rather than
@@ -399,6 +408,16 @@ html, body {
   border-color: var(--accent);
   color: var(--accent-text);
   font-weight: 600;
+}
+
+/* "랜덤 왁뿌"(main.js/random-wax.js) — 재질/왁스종류/색을 한 번에 새로 뽑는
+   액션 버튼이라, 선택 상태를 유지하는 다른 버튼들과 달리 절대 .active가 안
+   붙음(main.js가 대신 실제로 뽑힌 재질/종류 버튼 쪽에 .active를 옮겨 붙임) —
+   그래서 눌러도 표시가 안 남는 게 아니라 "누르는 행동 자체"라는 걸 점선
+   테두리로 구분해준다. */
+#random-wax-button {
+  border-style: dashed;
+  border-color: var(--accent);
 }
 
 .texture-row {

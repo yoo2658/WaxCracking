@@ -19,8 +19,20 @@ import { PointerInteraction } from './pointer-interaction.js';
 import { FragmentSystem } from './fragments.js';
 import { loadPhotoTexture, makeColorTexture } from './texture-loader.js';
 import { playMaterialSound, playWaxbbuSound, playFirstAttemptCrackSound, setMasterVolume } from './audio.js';
-import { initUI, showToast, updateWaxProgress, showCompletionBanner, hideCompletionBanner } from './ui.js';
+import {
+  initUI,
+  showToast,
+  updateWaxProgress,
+  updateDailyBreakCount,
+  showCompletionBanner,
+  hideCompletionBanner,
+  setColorPickerValue,
+  setWaxTypeSectionVisible,
+  setActiveButton,
+} from './ui.js';
 import { applyPressAnticipation } from './camera-effects.js';
+import { randomPastelColor, randomWaxType } from './random-wax.js';
+import { getTodayBreakCount, recordBreak } from './daily-count.js';
 
 const canvas = document.getElementById('scene-canvas');
 const { renderer, scene, camera, controls, groundY, ground } = createScene(canvas);
@@ -262,64 +274,116 @@ function requestRender() {
   needsExtraRender = true;
 }
 
+// onColorChange(색 피커)와 "랜덤 왁뿌"(random-wax.js) 둘 다 결국 "코어/셸에
+// 이 색을 입힌다"는 같은 일을 하므로 하나로 묶음 — 랜덤 왁뿌가 그 색을 대신
+// 고른 것뿐이지, 적용 자체는 사용자가 색 피커를 직접 바꾼 것과 완전히 동일하게
+// 처리되어야 함(사진 모드 해제 등).
+function applyColorChange(hex) {
+  currentColorHex = hex;
+  usingPhotoTexture = false;
+  setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
+  requestRender();
+}
+
+// wireButtonGroup의 클릭 콜백뿐 아니라 "랜덤 왁뿌"(아래 onRandomWax)도 실제
+// 종류/재질 적용 로직을 그대로 재사용해야 해서 이름 붙은 함수로 뺌 — 내용 자체는
+// 이전과 동일, 호출 경로만 하나 늘어남.
+function applyWaxTypeChange(waxType) {
+  // 크루아상은 색만 다른 스킨이 아니라 실제로 셸을 3장 쌓는 별도 구조라
+  // (deformable-mesh.js의 layerCount) — 색만 바꿔서는 안 되고, 크루아상으로
+  // 들어가거나 나올 때는 구조 자체를 다시 지어야 함. 그 외 모든 종류끼리의
+  // 전환(예: 기본→초콜릿)은 지금처럼 색만 바꿈. 왁뿌볼 모드에서는 이 행
+  // 자체가 숨겨져 있어(ui.js) 호출되지 않음.
+  const layeredChanged = (waxType === 'croissant') !== (currentWaxType === 'croissant');
+  currentWaxType = waxType;
+  setShellLook(shellMaterial, waxType);
+  if (layeredChanged) {
+    rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+  }
+  requestRender();
+}
+
+function applyMaterialChange(mode) {
+  const modeChanged = mode !== currentMaterialMode;
+  // 사진 모양에서 왁뿌볼 ↔ 다른 재질 전환은 겉면 구조 자체(분리형 vs 기존
+  // 단일형, 09_Plan.md)가 달라져야 하고, 크루아상이 선택된 상태에서 왁뿌볼
+  // ↔ 다른 재질 전환은 겹 구조 자체(1장 vs 3장, buildDeformable)가 달라져야
+  // 함 — 둘 다 setMaterialMode만으로는 반영이 안 되고 다시 지어야 함.
+  const structureChanged = modeChanged && (isCustomShape || currentWaxType === 'croissant');
+  currentMaterialMode = mode;
+  setCoreMaterialMode(coreMaterial, mode);
+  // "왁뿌볼" always wears its own dedicated rubbery-skin look regardless of
+  // whatever wax type was last picked — switching back to clay/slime
+  // restores that wax type's look exactly as it was. The color/photo
+  // picker still applies normally to the wax layer itself either way (see
+  // CORE_LOOK.waxbbu) — only the wax-TYPE row (기본/초콜릿/…, which only
+  // ever styles the shell) is hidden for this mode, see ui.js/setWaxTypeSectionVisible.
+  setShellLook(shellMaterial, mode === 'waxbbu' ? 'waxbbuShell' : currentWaxType);
+  // 클레이/슬라임/왁뿌볼 사이를 오갈 때마다 손상 상태를 들고 다니지 않고 매번
+  // 새 왁스로 시작 — 재질별로 부서지는 방식이 서로 달라서(구멍 vs 조각 소멸)
+  // 이전 재질의 손상 흔적이 남아있으면 어색해 보인다는 피드백. 이미 선택된
+  // 재질을 다시 눌렀을 때는(값이 안 바뀜) 리셋하지 않음.
+  if (structureChanged) {
+    // buildDeformable이 이미 위에서 바뀐 currentMaterialMode를 보고 알맞은
+    // 구조(합성/겹 수)를 고름. rebuildShape이 이미 startNewWaxTracking()을
+    // 호출하므로 아래 else 분기의 리셋과 중복되지 않음.
+    rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+  } else {
+    deformable.setMaterialMode(mode);
+    syncFillingVisibility();
+    if (modeChanged) {
+      deformable.reset();
+      fragments.reset();
+      shortTapCount = 0;
+      startNewWaxTracking();
+    }
+  }
+  requestRender();
+}
+
+// "랜덤 왁뿌"(main.js 요청 — 2026-08-11) 대상 3종. 크루아상/waxbbu 조합처럼
+// 겉보기엔 안 맞는 조합이 뽑혀도 buildDeformable이 이미 그 경우를 자기 안에서
+// 알아서 처리하므로(왁뿌볼은 항상 단일 셸 — main.js의 buildDeformable 참고)
+// 여기서 따로 걸러낼 필요는 없음.
+const RANDOM_MATERIAL_MODES = ['clay', 'slime', 'waxbbu'];
+
 const { initialColor } = initUI({
-  onWaxTypeChange: (waxType) => {
-    // 크루아상은 색만 다른 스킨이 아니라 실제로 셸을 3장 쌓는 별도 구조라
-    // (deformable-mesh.js의 layerCount) — 색만 바꿔서는 안 되고, 크루아상으로
-    // 들어가거나 나올 때는 구조 자체를 다시 지어야 함. 그 외 모든 종류끼리의
-    // 전환(예: 기본→초콜릿)은 지금처럼 색만 바꿈. 왁뿌볼 모드에서는 이 행
-    // 자체가 숨겨져 있어(ui.js) 호출되지 않음.
-    const layeredChanged = (waxType === 'croissant') !== (currentWaxType === 'croissant');
-    currentWaxType = waxType;
-    setShellLook(shellMaterial, waxType);
-    if (layeredChanged) {
-      rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
+  onWaxTypeChange: applyWaxTypeChange,
+  onMaterialChange: applyMaterialChange,
+  // 재질/왁스종류/색을 전부 새로 뽑아 한 번에 적용 — 사진이 등록된 상태라면
+  // (usingPhotoTexture) 색은 그대로 두고 재질/종류만 랜덤. 실제 적용은 위
+  // applyWaxTypeChange/applyMaterialChange를 그대로 재사용하고, 버튼 클릭
+  // 없이 프로그램적으로 값을 바꾸는 거라 어느 버튼이 실제로 선택됐는지도
+  // main.js가 직접 표시해줘야 함(setActiveButton) — wireButtonGroup은 실제
+  // 클릭에만 반응하므로 이 경로에선 자동으로 안 따라옴.
+  onRandomWax: () => {
+    const material = RANDOM_MATERIAL_MODES[Math.floor(Math.random() * RANDOM_MATERIAL_MODES.length)];
+    const waxType = randomWaxType();
+    if (!usingPhotoTexture) {
+      const color = randomPastelColor();
+      setColorPickerValue(color);
+      applyColorChange(color);
     }
+    applyWaxTypeChange(waxType);
+    applyMaterialChange(material);
+    setActiveButton('waxType', waxType);
+    setActiveButton('material', material);
+    setWaxTypeSectionVisible(material !== 'waxbbu');
+    // applyWaxTypeChange/applyMaterialChange only reset the wax (or rebuild
+    // it) when the randomly-picked value actually DIFFERS from what's
+    // currently selected — if the random draw happens to land on the same
+    // material+type already active, neither one resets anything, so a
+    // partway-broken wax stayed exactly as broken (reported directly:
+    // "랜덤은 클릭했을 때 초기화가 안 돼"). "랜덤 왁뿌" is meant to always
+    // hand over a fresh wax, so force it unconditionally — a no-op (and
+    // cheap) on top of a rebuild/reset that already just happened above.
+    deformable.reset();
+    fragments.reset();
+    shortTapCount = 0;
+    startNewWaxTracking();
     requestRender();
   },
-  onMaterialChange: (mode) => {
-    const modeChanged = mode !== currentMaterialMode;
-    // 사진 모양에서 왁뿌볼 ↔ 다른 재질 전환은 겉면 구조 자체(분리형 vs 기존
-    // 단일형, 09_Plan.md)가 달라져야 하고, 크루아상이 선택된 상태에서 왁뿌볼
-    // ↔ 다른 재질 전환은 겹 구조 자체(1장 vs 3장, buildDeformable)가 달라져야
-    // 함 — 둘 다 setMaterialMode만으로는 반영이 안 되고 다시 지어야 함.
-    const structureChanged = modeChanged && (isCustomShape || currentWaxType === 'croissant');
-    currentMaterialMode = mode;
-    setCoreMaterialMode(coreMaterial, mode);
-    // "왁뿌볼" always wears its own dedicated rubbery-skin look regardless of
-    // whatever wax type was last picked — switching back to clay/slime
-    // restores that wax type's look exactly as it was. The color/photo
-    // picker still applies normally to the wax layer itself either way (see
-    // CORE_LOOK.waxbbu) — only the wax-TYPE row (기본/초콜릿/…, which only
-    // ever styles the shell) is hidden for this mode, see ui.js.
-    setShellLook(shellMaterial, mode === 'waxbbu' ? 'waxbbuShell' : currentWaxType);
-    // 클레이/슬라임/왁뿌볼 사이를 오갈 때마다 손상 상태를 들고 다니지 않고 매번
-    // 새 왁스로 시작 — 재질별로 부서지는 방식이 서로 달라서(구멍 vs 조각 소멸)
-    // 이전 재질의 손상 흔적이 남아있으면 어색해 보인다는 피드백. 이미 선택된
-    // 재질을 다시 눌렀을 때는(값이 안 바뀜) 리셋하지 않음.
-    if (structureChanged) {
-      // buildDeformable이 이미 위에서 바뀐 currentMaterialMode를 보고 알맞은
-      // 구조(합성/겹 수)를 고름. rebuildShape이 이미 startNewWaxTracking()을
-      // 호출하므로 아래 else 분기의 리셋과 중복되지 않음.
-      rebuildShape(isCustomShape ? buildImageGeometry(currentSilhouette) : buildSphereGeometry(), isCustomShape);
-    } else {
-      deformable.setMaterialMode(mode);
-      syncFillingVisibility();
-      if (modeChanged) {
-        deformable.reset();
-        fragments.reset();
-        shortTapCount = 0;
-        startNewWaxTracking();
-      }
-    }
-    requestRender();
-  },
-  onColorChange: (hex) => {
-    currentColorHex = hex;
-    usingPhotoTexture = false;
-    setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
-    requestRender();
-  },
+  onColorChange: applyColorChange,
   onPhotoChange: async (file) => {
     const { texture, silhouette } = await loadPhotoTexture(file);
     usingPhotoTexture = true;
@@ -360,6 +424,7 @@ const { initialColor } = initUI({
 
 currentColorHex = initialColor;
 setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
+updateDailyBreakCount(getTodayBreakCount()); // 새로고침해도 오늘 기록은 이어서 보이게
 
 // Leaving this tab open in the background (e.g. while playing something else)
 // shouldn't cost anything: fully stop the loop — not just skip rendering,
@@ -402,6 +467,7 @@ function tick() {
     if (!completionShown && remainingRatio <= COMPLETION_REMAINING_THRESHOLD) {
       completionShown = true;
       showCompletionBanner((now - waxStartTime) / 1000, clickCount);
+      updateDailyBreakCount(recordBreak()); // daily-count.js — 오늘 날짜에 없으면 자동으로 1부터
     }
   }
   const fragmentsAnimating = fragments.update(dt);
