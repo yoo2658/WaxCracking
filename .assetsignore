@@ -1,0 +1,14 @@
+# Cloudflare Workers 정적 자산 스캔에서 제외 — 경로를 저장소 루트(/)로 잡아뒀기 때문에,
+# 빌드 중 npm install이 새로 만드는 node_modules(그 안의 wrangler 하위 의존성 workerd
+# 바이너리가 144MB라 Workers의 파일당 25MiB 제한을 넘어 빌드가 실패했음)와, 애초에
+# 웹에 서빙될 필요 없는 나머지 파일들을 걸러냄. 실제로 서빙되는 건 index.html,
+# style.css, dist/bundle.js, sounds/*뿐.
+node_modules
+.git
+.wrangler
+src
+package.json
+package-lock.json
+.gitignore
+README.md
+CNAME
