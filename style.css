@@ -442,6 +442,29 @@ html, body {
   transition: background 0.2s ease, box-shadow 0.2s ease, width 0.15s ease, padding 0.15s ease, border-radius 0.15s ease;
 }
 
+/* 좁은 화면(휴대폰)에서는 아이콘 버튼 3개(⭐📸↺, flex-shrink:0로 68px 고정) +
+   #ui(260px, min-width:0이라 얼마든지 눌릴 수 있음)가 한 줄에 다 안 들어가면,
+   #ui만 남는 자투리 공간(때에 따라 100px대)까지 짜부라져서 제목 "왁스 뿌수기"가
+   한 글자씩 세로로 줄바꿈되고 종류/왁스종류 버튼들이 패널 밖으로 넘쳐 잘리는
+   문제가 있었음("핸드폰에서 보는 뷰가 완전 찌그러졌잖아" — 실제 기기 스크린샷으로
+   확인). #ui-wrapper 자체에 폭을 못박고 줄바꿈을 허용해서, 펼쳤을 때는 버튼
+   줄 아래 자기 줄로 내려가 전체 폭을 다 쓰게 함 — 접혔을 때(68x68 정사각형)는
+   자리만 있으면 버튼들과 그대로 한 줄에 남음. 내용이 화면보다 길면 패널
+   안에서만 스크롤(요청하신 대로 — "메뉴 안에 스크롤이 들어가도 상관없음"). */
+@media (max-width: 600px) {
+  #ui-wrapper {
+    width: calc(100vw - 40px);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  #ui:not(.collapsed) {
+    width: 100%;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+  }
+}
+
 /* Collapsed: same 68x68 square as #quick-reset-button, not a shrunken bar —
    the header's own title text is hidden and its toggle button (below)
    expands to fill the whole square, so the two buttons read as one
