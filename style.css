@@ -384,6 +384,13 @@ html, body {
   color: var(--text-muted);
 }
 
+/* flex-direction이 기본값(row)이라, 이 컨테이너 자신의 높이는 가장 키가 큰
+   자식(#ui 패널, 최대 600px+)에 맞춰 늘어남 — 그런데 아이콘 버튼들(68px)은 그
+   늘어난 높이의 극히 일부만 차지해서, 버튼들 오른쪽/아래의 "비어 보이는" 공간도
+   실제로는 이 div의 히트박스 안이라 캔버스 드래그/클릭을 조용히 먹어버리는
+   버그가 있었음("메뉴를 활성화했을 때 화면의 절반이 드래그가 안 되고 왁스도
+   안 눌림" — elementFromPoint로 직접 확인). 컨테이너 자체는 클릭을 투과시키고
+   (pointer-events: none), 실제로 보이는 자식들만 다시 클릭 가능하게 함. */
 #ui-wrapper {
   position: fixed;
   top: 20px;
@@ -392,6 +399,11 @@ html, body {
   align-items: flex-start;
   gap: 10px;
   max-width: calc(100vw - 40px);
+  pointer-events: none;
+}
+
+#ui-wrapper > * {
+  pointer-events: auto;
 }
 
 #quick-reset-button,

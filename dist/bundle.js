@@ -8437,6 +8437,45 @@
   };
   var _color = /* @__PURE__ */ new Color();
   Color.NAMES = _colorKeywords;
+  var Fog = class _Fog {
+    /**
+     * Constructs a new fog.
+     *
+     * @param {number|Color} color - The fog's color.
+     * @param {number} [near=1] - The minimum distance to start applying fog.
+     * @param {number} [far=1000] - The maximum distance at which fog stops being calculated and applied.
+     */
+    constructor(color, near = 1, far = 1e3) {
+      this.isFog = true;
+      this.name = "";
+      this.color = new Color(color);
+      this.near = near;
+      this.far = far;
+    }
+    /**
+     * Returns a new fog with copied values from this instance.
+     *
+     * @return {Fog} A clone of this instance.
+     */
+    clone() {
+      return new _Fog(this.color, this.near, this.far);
+    }
+    /**
+     * Serializes the fog into JSON.
+     *
+     * @param {?(Object|string)} meta - An optional value holding meta information about the serialization.
+     * @return {Object} A JSON object representing the serialized fog
+     */
+    toJSON() {
+      return {
+        type: "Fog",
+        name: this.name,
+        color: this.color.getHex(),
+        near: this.near,
+        far: this.far
+      };
+    }
+  };
   var Scene = class extends Object3D {
     /**
      * Constructs a new scene.
@@ -31358,12 +31397,44 @@ void main() {
   // src/scene.js
   var GROUND_Y = -1.35;
   var SCENE_THEME_COLORS = {
-    dark: { background: 2303534, ground: 1711138 },
-    light: { background: 15527665, ground: 14146270 }
+    dark: { inner: 3815496, outer: 1316123, ground: 1513501 },
+    light: { inner: 16774370, outer: 10988740, ground: 10791361 }
   };
+  var BACKGROUND_TEXTURE_SIZE = 512;
+  function createGradientTexture(innerHex, outerHex) {
+    const canvas2 = document.createElement("canvas");
+    canvas2.width = canvas2.height = BACKGROUND_TEXTURE_SIZE;
+    const ctx = canvas2.getContext("2d");
+    const half = BACKGROUND_TEXTURE_SIZE / 2;
+    const radius = half * Math.SQRT2;
+    const gradient = ctx.createRadialGradient(half, half, 0, half, half, radius);
+    gradient.addColorStop(0, `#${new Color(innerHex).getHexString()}`);
+    gradient.addColorStop(1, `#${new Color(outerHex).getHexString()}`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, BACKGROUND_TEXTURE_SIZE, BACKGROUND_TEXTURE_SIZE);
+    const texture = new CanvasTexture(canvas2);
+    texture.colorSpace = SRGBColorSpace;
+    return texture;
+  }
+  var GROUND_ALPHA_TEXTURE_SIZE = 256;
+  var GROUND_FEATHER_START = 0.55;
+  function createGroundAlphaTexture() {
+    const canvas2 = document.createElement("canvas");
+    canvas2.width = canvas2.height = GROUND_ALPHA_TEXTURE_SIZE;
+    const ctx = canvas2.getContext("2d");
+    const half = GROUND_ALPHA_TEXTURE_SIZE / 2;
+    const gradient = ctx.createRadialGradient(half, half, half * GROUND_FEATHER_START, half, half, half);
+    gradient.addColorStop(0, "rgb(255, 255, 255)");
+    gradient.addColorStop(1, "rgb(0, 0, 0)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, GROUND_ALPHA_TEXTURE_SIZE, GROUND_ALPHA_TEXTURE_SIZE);
+    return new CanvasTexture(canvas2);
+  }
   function setSceneTheme(scene2, ground2, theme) {
     const colors = SCENE_THEME_COLORS[theme] ?? SCENE_THEME_COLORS.dark;
-    scene2.background.set(colors.background);
+    scene2.background?.dispose?.();
+    scene2.background = createGradientTexture(colors.inner, colors.outer);
+    scene2.fog.color.set(colors.outer);
     ground2.material.color.set(colors.ground);
   }
   function createScene(canvas2) {
@@ -31372,7 +31443,8 @@ void main() {
     renderer2.toneMapping = ACESFilmicToneMapping;
     renderer2.toneMappingExposure = 1.05;
     const scene2 = new Scene();
-    scene2.background = new Color(2303534);
+    scene2.fog = new Fog(SCENE_THEME_COLORS.dark.outer, 7.5, 13);
+    scene2.background = createGradientTexture(SCENE_THEME_COLORS.dark.inner, SCENE_THEME_COLORS.dark.outer);
     const camera2 = new PerspectiveCamera(42, 1, 0.1, 100);
     camera2.position.set(0, 0.15, 4.4);
     camera2.lookAt(0, 0, 0);
@@ -31388,7 +31460,12 @@ void main() {
     camera2.add(rim);
     const ground2 = new Mesh(
       new CircleGeometry(6, 48),
-      new MeshStandardMaterial({ color: 1711138, roughness: 0.95 })
+      new MeshStandardMaterial({
+        color: SCENE_THEME_COLORS.dark.ground,
+        roughness: 0.95,
+        transparent: true,
+        alphaMap: createGroundAlphaTexture()
+      })
     );
     ground2.rotation.x = -Math.PI / 2;
     ground2.position.y = GROUND_Y;
