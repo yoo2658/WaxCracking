@@ -24,6 +24,8 @@
   <div id="toast" role="status" aria-live="polite"></div>
 
   <div id="ui-wrapper">
+    <button type="button" id="save-list-button" aria-label="내 왁뿌 저장 목록" title="내 왁뿌 저장 목록">⭐</button>
+    <button type="button" id="save-photo-button" aria-label="사진으로 저장" title="사진으로 저장">📸</button>
     <button type="button" id="quick-reset-button" aria-label="새 왁스로 리셋" title="새 왁스로 리셋">↺</button>
 
     <div id="ui">
@@ -98,6 +100,17 @@
       </section>
     </div>
     </div>
+  </div>
+
+  <div id="save-list-panel" role="dialog" aria-live="polite">
+    <button type="button" id="save-list-close" aria-label="닫기">✕</button>
+    <p class="save-list-title">내 왁뿌 저장</p>
+    <div id="save-name-row">
+      <input type="text" id="save-name-input" placeholder="이름을 입력하세요" maxlength="20" />
+      <button type="button" id="save-name-confirm">저장</button>
+    </div>
+    <ul id="save-list-items"></ul>
+    <p id="save-list-empty" class="hint">아직 저장한 왁뿌가 없어요.</p>
   </div>
 
   <div id="help-panel" role="dialog" aria-live="polite">

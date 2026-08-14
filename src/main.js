@@ -17,7 +17,7 @@ import {
 } from './wax-material.js';
 import { PointerInteraction } from './pointer-interaction.js';
 import { FragmentSystem } from './fragments.js';
-import { loadPhotoTexture, makeColorTexture } from './texture-loader.js';
+import { loadPhotoTexture, loadPhotoTextureFromSavedThumbnail, makeSaveThumbnail, makeColorTexture } from './texture-loader.js';
 import { playMaterialSound, playWaxbbuSound, playFirstAttemptCrackSound, setMasterVolume } from './audio.js';
 import {
   initUI,
@@ -29,10 +29,14 @@ import {
   setColorPickerValue,
   setWaxTypeSectionVisible,
   setActiveButton,
+  setPhotoUIState,
+  renderSavedWaxList,
+  hideSaveListPanel,
 } from './ui.js';
 import { applyPressAnticipation } from './camera-effects.js';
 import { randomPastelColor, randomWaxType } from './random-wax.js';
 import { getTodayBreakCount, recordBreak } from './daily-count.js';
+import { getSavedWaxes, saveWax, deleteSavedWax, MAX_SAVED_WAXES } from './saved-waxes.js';
 
 const canvas = document.getElementById('scene-canvas');
 const { renderer, scene, camera, controls, groundY, ground } = createScene(canvas);
@@ -63,6 +67,11 @@ let currentColorHex;
 let usingPhotoTexture = false; // true once an uploaded photo (not the flat color picker) is the current texture
 let isCustomShape = false; // true once a transparent-background photo has swapped the shape away from the default sphere
 let currentSilhouette = null; // the custom shape's own source silhouette, kept around so switching material mode can rebuild it (see CompositeWaxbbuMesh) without re-uploading the photo
+// 내 왁뿌 저장(27_Plan.md)이 썸네일을 만들 때 필요 — texture.image로도 접근
+// 가능하지만, "지금 사진 텍스처를 쓰고 있는가"와 "그 원본 이미지가 뭔가"를
+// 한 곳(applyPhotoResult)에서만 같이 관리하는 게 더 명확함. 사진이 아니라
+// 색을 쓰는 순간(applyColorChange) 항상 null로 비움.
+let currentPhotoImage = null;
 
 // "왁뿌볼" + a custom shape only — how much bigger than the wax itself the
 // outer rubber bubble sits (see composite-waxbbu-mesh.js) — still a visible
@@ -281,7 +290,35 @@ function requestRender() {
 function applyColorChange(hex) {
   currentColorHex = hex;
   usingPhotoTexture = false;
+  currentPhotoImage = null; // 색으로 전환했으니, 저장할 때 더 이상 사진 썸네일을 만들 원본이 없음
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
+  setPhotoUIState(false); // 사진 제거 버튼 비활성화 + 색 피커 활성화 + 파일명 표시 지움
+  requestRender();
+}
+
+// onPhotoChange(파일 업로드)와 내 왁뿌 저장 "불러오기"(loadSavedWax, 아래) 둘 다
+// 결국 texture-loader.js가 만들어준 { texture, silhouette }를 화면에 그대로
+// 적용하는 같은 일을 하므로 하나로 묶음 — 불러오기는 그 texture/silhouette를
+// 파일이 아니라 저장된 썸네일에서 얻어올 뿐, 적용 자체는 완전히 동일. label은
+// "사진 제거" 버튼 옆에 보여줄 문구(업로드는 파일명, 불러오기는 저장된 이름) —
+// 둘 다 이 함수 하나로 setPhotoUIState까지 같이 처리하므로 호출부에서 버튼
+// 상태를 따로 안 맞춰줘도 됨(예전에는 change 이벤트 쪽에만 있어서, 불러오기
+// 경로는 사진 제거 버튼이 계속 비활성으로 남는 버그가 있었음).
+function applyPhotoResult({ texture, silhouette }, label) {
+  usingPhotoTexture = true;
+  currentPhotoImage = texture.image; // 다음에 "지금 왁뿌 저장하기"를 누르면 이 이미지로 썸네일을 다시 만듦
+  setCoreTexture(coreMaterial, shellMaterial, texture);
+  if (silhouette) {
+    currentSilhouette = silhouette;
+    rebuildShape(buildImageGeometry(silhouette), true);
+    isCustomShape = true;
+  } else if (isCustomShape) {
+    // Swapped in an opaque photo/color while a custom shape was active — back to the plain sphere.
+    currentSilhouette = null;
+    rebuildShape(buildSphereGeometry(), false);
+    isCustomShape = false;
+  }
+  setPhotoUIState(true, label);
   requestRender();
 }
 
@@ -341,6 +378,78 @@ function applyMaterialChange(mode) {
   requestRender();
 }
 
+// 내 왁뿌 저장(27_Plan.md) — 목록이 바뀔 때마다(저장/삭제/시작 시 최초 1회)
+// ui.js에 최신 목록을 다시 그려달라고 함. onLoad/onDelete를 매번 새로 넘기는
+// 이유: 그때그때의 최신 클로저(이 함수들 자체)를 쓰면 되므로, "한 번 등록해두고
+// 계속 재사용"할 별도 상태가 따로 필요 없음.
+function refreshSavedWaxList() {
+  renderSavedWaxList(getSavedWaxes(), { onLoad: loadSavedWax, onDelete: deleteSavedWaxAndRefresh });
+}
+
+async function loadSavedWax(id) {
+  const entry = getSavedWaxes().find((item) => item.id === id);
+  if (!entry) return; // 목록을 열어둔 다른 탭에서 방금 지워졌거나 하는 극단적인 경우 — 조용히 무시
+  if (entry.photoThumbnail) {
+    applyPhotoResult(await loadPhotoTextureFromSavedThumbnail(entry.photoThumbnail), `사진: ${entry.name}`);
+  } else if (entry.color) {
+    setColorPickerValue(entry.color);
+    applyColorChange(entry.color);
+  }
+  applyWaxTypeChange(entry.waxType);
+  applyMaterialChange(entry.materialMode);
+  setActiveButton('waxType', entry.waxType);
+  setActiveButton('material', entry.materialMode);
+  setWaxTypeSectionVisible(entry.materialMode !== 'waxbbu');
+  // "랜덤 왁뿌"와 같은 이유로 강제 리셋 — 저장해둔 재질/종류가 우연히 지금과
+  // 같으면 위 두 함수가 아무 것도 안 바꿔서, 부수던 중이던 왁스가 그대로
+  // 남을 수 있음.
+  deformable.reset();
+  fragments.reset();
+  shortTapCount = 0;
+  startNewWaxTracking();
+  hideSaveListPanel(); // 불러온 뒤엔 목록을 닫아서 바로 왁스가 보이게
+  requestRender();
+}
+
+function deleteSavedWaxAndRefresh(id) {
+  renderSavedWaxList(deleteSavedWax(id), { onLoad: loadSavedWax, onDelete: deleteSavedWaxAndRefresh });
+}
+
+// 사진으로 저장(34_Plan.md) — "내 왁뿌 저장"(재질/색/사진 등 설정값을 나중에 앱
+// 안에서 다시 불러오기용으로 localStorage에 저장)과는 별개로, 지금 3D 장면
+// 자체를 진짜 이미지 파일로 만들어 기기의 일반 다운로드 경로에 내려받음.
+// scene.js가 WebGLRenderer를 만들 때 preserveDrawingBuffer를 안 켜뒀음(저사양
+// 기기에서 매 프레임 버퍼를 하나 더 유지하는 상시 비용을 늘리고 싶지 않아서) —
+// 그래서 render() 직후 같은 동기 실행 흐름 안에서 바로 canvas.toBlob을 불러야
+// 안전하게 읽힘(브라우저가 버퍼를 지우는 건 이 실행이 끝나고 이벤트 루프로
+// 돌아간 뒤). 렌더 온디맨드 루프(tick())와 별개로 여기서 직접 한 번 더 그리는
+// 이유도 이것 — "지금 이 순간의 화면"을 확실하게 그려두기 위해서.
+function saveCurrentPhoto() {
+  renderer.render(scene, camera);
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      showToast('사진 저장에 실패했어요');
+      return;
+    }
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const url = URL.createObjectURL(blob);
+    // 다운로드 폴더로 바로 저장되는 표준적인 방법 — 서버나 파일시스템 API 없이
+    // <a download>가 브라우저의 일반 다운로드 동작을 그대로 트리거함. 일부
+    // 브라우저는 DOM에 붙어있지 않은 <a>의 click()을 무시할 수 있어 안전하게
+    // 잠깐 붙였다 뗌.
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `왁뿌_${stamp}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('사진으로 저장했어요');
+  }, 'image/png');
+}
+
 // "랜덤 왁뿌"(main.js 요청 — 2026-08-11) 대상 3종. 크루아상/waxbbu 조합처럼
 // 겉보기엔 안 맞는 조합이 뽑혀도 buildDeformable이 이미 그 경우를 자기 안에서
 // 알아서 처리하므로(왁뿌볼은 항상 단일 셸 — main.js의 buildDeformable 참고)
@@ -384,22 +493,7 @@ const { initialColor } = initUI({
     requestRender();
   },
   onColorChange: applyColorChange,
-  onPhotoChange: async (file) => {
-    const { texture, silhouette } = await loadPhotoTexture(file);
-    usingPhotoTexture = true;
-    setCoreTexture(coreMaterial, shellMaterial, texture);
-    if (silhouette) {
-      currentSilhouette = silhouette;
-      rebuildShape(buildImageGeometry(silhouette), true);
-      isCustomShape = true;
-    } else if (isCustomShape) {
-      // Swapped in an opaque photo/color while a custom shape was active — back to the plain sphere.
-      currentSilhouette = null;
-      rebuildShape(buildSphereGeometry(), false);
-      isCustomShape = false;
-    }
-    requestRender();
-  },
+  onPhotoChange: async (file) => applyPhotoResult(await loadPhotoTexture(file), `사진: ${file.name}`),
   onPhotoRemove: () => {
     if (isCustomShape) {
       currentSilhouette = null;
@@ -420,11 +514,26 @@ const { initialColor } = initUI({
     setSceneTheme(scene, ground, theme);
     requestRender();
   },
+  // 내 왁뿌 저장(27_Plan.md) — 사진이 등록된 상태라면 색 대신 지금 사진의
+  // 작은 썸네일을 저장(usingPhotoTexture && currentPhotoImage 둘 다 있어야
+  // 함 — 색만 골랐다면 currentPhotoImage는 항상 null).
+  onSaveCurrentWax: (name) => {
+    const photoThumbnail = usingPhotoTexture && currentPhotoImage ? makeSaveThumbnail(currentPhotoImage) : null;
+    const color = photoThumbnail ? null : currentColorHex;
+    const result = saveWax({ name, materialMode: currentMaterialMode, waxType: currentWaxType, color, photoThumbnail });
+    if (result === null) {
+      showToast(`저장은 최대 ${MAX_SAVED_WAXES}개까지 가능해요 — 하나 지우고 다시 저장해주세요`);
+      return;
+    }
+    renderSavedWaxList(result, { onLoad: loadSavedWax, onDelete: deleteSavedWaxAndRefresh });
+  },
+  onSavePhoto: saveCurrentPhoto,
 });
 
 currentColorHex = initialColor;
 setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
 updateDailyBreakCount(getTodayBreakCount()); // 새로고침해도 오늘 기록은 이어서 보이게
+refreshSavedWaxList(); // 내 왁뿌 저장 목록도 새로고침해도 이어서 보이게
 
 // Leaving this tab open in the background (e.g. while playing something else)
 // shouldn't cost anything: fully stop the loop — not just skip rendering,

@@ -33767,26 +33767,41 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     canvas2.getContext("2d").drawImage(image, 0, 0, canvas2.width, canvas2.height);
     return canvas2;
   }
+  function loadPhotoTextureFromDataUrl(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("\uC774\uBBF8\uC9C0\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."));
+      image.onload = () => {
+        const texture = new Texture(resizeForTexture(image));
+        texture.colorSpace = SRGBColorSpace;
+        texture.wrapS = ClampToEdgeWrapping;
+        texture.wrapT = ClampToEdgeWrapping;
+        texture.needsUpdate = true;
+        const silhouette = extractSilhouette(image);
+        resolve({ texture, silhouette });
+      };
+      image.src = dataUrl;
+    });
+  }
   function loadPhotoTexture(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(reader.error);
-      reader.onload = () => {
-        const image = new Image();
-        image.onerror = () => reject(new Error("\uC774\uBBF8\uC9C0\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."));
-        image.onload = () => {
-          const texture = new Texture(resizeForTexture(image));
-          texture.colorSpace = SRGBColorSpace;
-          texture.wrapS = ClampToEdgeWrapping;
-          texture.wrapT = ClampToEdgeWrapping;
-          texture.needsUpdate = true;
-          const silhouette = extractSilhouette(image);
-          resolve({ texture, silhouette });
-        };
-        image.src = reader.result;
-      };
+      reader.onload = () => resolve(loadPhotoTextureFromDataUrl(reader.result));
       reader.readAsDataURL(file);
     });
+  }
+  function loadPhotoTextureFromSavedThumbnail(dataUrl) {
+    return loadPhotoTextureFromDataUrl(dataUrl);
+  }
+  var SAVE_THUMBNAIL_MAX_DIMENSION = 256;
+  function makeSaveThumbnail(image) {
+    const scale = Math.min(1, SAVE_THUMBNAIL_MAX_DIMENSION / Math.max(image.width, image.height));
+    const canvas2 = document.createElement("canvas");
+    canvas2.width = Math.max(1, Math.round(image.width * scale));
+    canvas2.height = Math.max(1, Math.round(image.height * scale));
+    canvas2.getContext("2d").drawImage(image, 0, 0, canvas2.width, canvas2.height);
+    return canvas2.toDataURL("image/png");
   }
   function makeColorTexture(hexColor) {
     const canvas2 = document.createElement("canvas");
@@ -33941,7 +33956,9 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     onReset,
     onVolumeChange,
     onThemeChange,
-    onRandomWax
+    onRandomWax,
+    onSaveCurrentWax,
+    onSavePhoto
   }) {
     wireButtonGroup("waxType", onWaxTypeChange);
     wireButtonGroup("material", (mode) => {
@@ -33949,6 +33966,25 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       onMaterialChange(mode);
     });
     document.getElementById("random-wax-button").addEventListener("click", () => onRandomWax?.());
+    const saveListPanel = document.getElementById("save-list-panel");
+    const saveNameInput = document.getElementById("save-name-input");
+    document.getElementById("save-list-button").addEventListener("click", () => {
+      saveListPanel.classList.add("visible");
+    });
+    document.getElementById("save-list-close").addEventListener("click", () => {
+      saveListPanel.classList.remove("visible");
+    });
+    const confirmSaveName = () => {
+      const name = saveNameInput.value.trim();
+      if (!name) return;
+      onSaveCurrentWax?.(name);
+      saveNameInput.value = "";
+    };
+    document.getElementById("save-name-confirm").addEventListener("click", confirmSaveName);
+    saveNameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") confirmSaveName();
+    });
+    document.getElementById("save-photo-button").addEventListener("click", () => onSavePhoto?.());
     wireButtonGroup("theme", (theme) => {
       document.documentElement.dataset.theme = theme;
       onThemeChange?.(theme);
@@ -33956,7 +33992,6 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     const colorPicker = document.getElementById("color-picker");
     const photoInput = document.getElementById("photo-input");
     const removePhotoButton = document.getElementById("remove-photo");
-    const photoNameLabel = document.getElementById("photo-name");
     const resetButton = document.getElementById("reset-button");
     const quickResetButton = document.getElementById("quick-reset-button");
     const volumeSlider = document.getElementById("volume-slider");
@@ -33970,18 +34005,12 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       showToast("\uBAA8\uC591 \uB9CC\uB4DC\uB294 \uC911\u2026");
       try {
         await onPhotoChange(file);
-        photoNameLabel.textContent = `\uC0AC\uC9C4: ${file.name}`;
-        removePhotoButton.disabled = false;
-        colorPicker.disabled = true;
       } finally {
         photoInput.disabled = false;
       }
     });
     removePhotoButton.addEventListener("click", () => {
       photoInput.value = "";
-      photoNameLabel.textContent = "";
-      removePhotoButton.disabled = true;
-      colorPicker.disabled = false;
       onPhotoRemove();
       onColorChange(colorPicker.value);
     });
@@ -34022,6 +34051,11 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   function setColorPickerValue(hex) {
     document.getElementById("color-picker").value = hex;
   }
+  function setPhotoUIState(active, label = "") {
+    document.getElementById("remove-photo").disabled = !active;
+    document.getElementById("color-picker").disabled = active;
+    document.getElementById("photo-name").textContent = label;
+  }
   function setWaxTypeSectionVisible(visible) {
     document.getElementById("wax-type-section").style.display = visible ? "" : "none";
   }
@@ -34044,6 +34078,45 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     document.getElementById("completion-time").textContent = `${seconds.toFixed(1)}\uCD08 \uAC78\uB9BC`;
     document.getElementById("completion-clicks").textContent = `${clicks}\uD68C \uB204\uB984`;
     banner.classList.add("visible");
+  }
+  function renderSavedWaxList(list, { onLoad, onDelete }) {
+    const itemsEl = document.getElementById("save-list-items");
+    const emptyEl = document.getElementById("save-list-empty");
+    itemsEl.replaceChildren();
+    emptyEl.style.display = list.length ? "none" : "";
+    for (const item of list) {
+      const li = document.createElement("li");
+      li.className = "save-item";
+      const loadButton = document.createElement("button");
+      loadButton.type = "button";
+      loadButton.className = "save-item-load";
+      const thumb = document.createElement("span");
+      thumb.className = "save-item-thumb";
+      if (item.photoThumbnail) {
+        thumb.style.backgroundImage = `url(${item.photoThumbnail})`;
+      } else {
+        thumb.style.backgroundColor = item.color || "#fefad7";
+      }
+      const nameEl = document.createElement("span");
+      nameEl.className = "save-item-name";
+      nameEl.textContent = item.name;
+      loadButton.append(thumb, nameEl);
+      loadButton.addEventListener("click", () => onLoad(item.id));
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "save-item-delete";
+      deleteButton.setAttribute("aria-label", "\uC0AD\uC81C");
+      deleteButton.textContent = "\u2715";
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onDelete(item.id);
+      });
+      li.append(loadButton, deleteButton);
+      itemsEl.appendChild(li);
+    }
+  }
+  function hideSaveListPanel() {
+    document.getElementById("save-list-panel").classList.remove("visible");
   }
 
   // src/camera-effects.js
@@ -34138,6 +34211,49 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     return count;
   }
 
+  // src/saved-waxes.js
+  var STORAGE_KEY2 = "waxcracking:savedWaxes";
+  var MAX_SAVED_WAXES = 10;
+  function readAll() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY2);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  function writeAll(list) {
+    try {
+      localStorage.setItem(STORAGE_KEY2, JSON.stringify(list));
+    } catch {
+    }
+  }
+  function getSavedWaxes() {
+    return readAll();
+  }
+  function saveWax({ name, materialMode, waxType, color, photoThumbnail }) {
+    const list = readAll();
+    if (list.length >= MAX_SAVED_WAXES) return null;
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      materialMode,
+      waxType,
+      color: color ?? null,
+      photoThumbnail: photoThumbnail ?? null,
+      createdAt: Date.now()
+    };
+    list.push(entry);
+    writeAll(list);
+    return list;
+  }
+  function deleteSavedWax(id) {
+    const list = readAll().filter((item) => item.id !== id);
+    writeAll(list);
+    return list;
+  }
+
   // src/main.js
   var canvas = document.getElementById("scene-canvas");
   var { renderer, scene, camera, controls, groundY, ground } = createScene(canvas);
@@ -34158,6 +34274,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   var usingPhotoTexture = false;
   var isCustomShape = false;
   var currentSilhouette = null;
+  var currentPhotoImage = null;
   var WAXBBU_BUBBLE_RADIUS_SCALE = 1.15;
   function buildDeformable(geometry, isCustom) {
     if (currentMaterialMode === "waxbbu" && isCustom) {
@@ -34269,7 +34386,25 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   function applyColorChange(hex) {
     currentColorHex = hex;
     usingPhotoTexture = false;
+    currentPhotoImage = null;
     setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(hex));
+    setPhotoUIState(false);
+    requestRender();
+  }
+  function applyPhotoResult({ texture, silhouette }, label) {
+    usingPhotoTexture = true;
+    currentPhotoImage = texture.image;
+    setCoreTexture(coreMaterial, shellMaterial, texture);
+    if (silhouette) {
+      currentSilhouette = silhouette;
+      rebuildShape(buildImageGeometry(silhouette), true);
+      isCustomShape = true;
+    } else if (isCustomShape) {
+      currentSilhouette = null;
+      rebuildShape(buildSphereGeometry(), false);
+      isCustomShape = false;
+    }
+    setPhotoUIState(true, label);
     requestRender();
   }
   function applyWaxTypeChange(waxType) {
@@ -34301,6 +34436,54 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     }
     requestRender();
   }
+  function refreshSavedWaxList() {
+    renderSavedWaxList(getSavedWaxes(), { onLoad: loadSavedWax, onDelete: deleteSavedWaxAndRefresh });
+  }
+  async function loadSavedWax(id) {
+    const entry = getSavedWaxes().find((item) => item.id === id);
+    if (!entry) return;
+    if (entry.photoThumbnail) {
+      applyPhotoResult(await loadPhotoTextureFromSavedThumbnail(entry.photoThumbnail), `\uC0AC\uC9C4: ${entry.name}`);
+    } else if (entry.color) {
+      setColorPickerValue(entry.color);
+      applyColorChange(entry.color);
+    }
+    applyWaxTypeChange(entry.waxType);
+    applyMaterialChange(entry.materialMode);
+    setActiveButton("waxType", entry.waxType);
+    setActiveButton("material", entry.materialMode);
+    setWaxTypeSectionVisible(entry.materialMode !== "waxbbu");
+    deformable.reset();
+    fragments.reset();
+    shortTapCount = 0;
+    startNewWaxTracking();
+    hideSaveListPanel();
+    requestRender();
+  }
+  function deleteSavedWaxAndRefresh(id) {
+    renderSavedWaxList(deleteSavedWax(id), { onLoad: loadSavedWax, onDelete: deleteSavedWaxAndRefresh });
+  }
+  function saveCurrentPhoto() {
+    renderer.render(scene, camera);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        showToast("\uC0AC\uC9C4 \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC5B4\uC694");
+        return;
+      }
+      const now = /* @__PURE__ */ new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `\uC641\uBFCC_${stamp}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("\uC0AC\uC9C4\uC73C\uB85C \uC800\uC7A5\uD588\uC5B4\uC694");
+    }, "image/png");
+  }
   var RANDOM_MATERIAL_MODES = ["clay", "slime", "waxbbu"];
   var { initialColor } = initUI({
     onWaxTypeChange: applyWaxTypeChange,
@@ -34331,21 +34514,7 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
       requestRender();
     },
     onColorChange: applyColorChange,
-    onPhotoChange: async (file) => {
-      const { texture, silhouette } = await loadPhotoTexture(file);
-      usingPhotoTexture = true;
-      setCoreTexture(coreMaterial, shellMaterial, texture);
-      if (silhouette) {
-        currentSilhouette = silhouette;
-        rebuildShape(buildImageGeometry(silhouette), true);
-        isCustomShape = true;
-      } else if (isCustomShape) {
-        currentSilhouette = null;
-        rebuildShape(buildSphereGeometry(), false);
-        isCustomShape = false;
-      }
-      requestRender();
-    },
+    onPhotoChange: async (file) => applyPhotoResult(await loadPhotoTexture(file), `\uC0AC\uC9C4: ${file.name}`),
     onPhotoRemove: () => {
       if (isCustomShape) {
         currentSilhouette = null;
@@ -34365,11 +34534,26 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     onThemeChange: (theme) => {
       setSceneTheme(scene, ground, theme);
       requestRender();
-    }
+    },
+    // 내 왁뿌 저장(27_Plan.md) — 사진이 등록된 상태라면 색 대신 지금 사진의
+    // 작은 썸네일을 저장(usingPhotoTexture && currentPhotoImage 둘 다 있어야
+    // 함 — 색만 골랐다면 currentPhotoImage는 항상 null).
+    onSaveCurrentWax: (name) => {
+      const photoThumbnail = usingPhotoTexture && currentPhotoImage ? makeSaveThumbnail(currentPhotoImage) : null;
+      const color = photoThumbnail ? null : currentColorHex;
+      const result = saveWax({ name, materialMode: currentMaterialMode, waxType: currentWaxType, color, photoThumbnail });
+      if (result === null) {
+        showToast(`\uC800\uC7A5\uC740 \uCD5C\uB300 ${MAX_SAVED_WAXES}\uAC1C\uAE4C\uC9C0 \uAC00\uB2A5\uD574\uC694 \u2014 \uD558\uB098 \uC9C0\uC6B0\uACE0 \uB2E4\uC2DC \uC800\uC7A5\uD574\uC8FC\uC138\uC694`);
+        return;
+      }
+      renderSavedWaxList(result, { onLoad: loadSavedWax, onDelete: deleteSavedWaxAndRefresh });
+    },
+    onSavePhoto: saveCurrentPhoto
   });
   currentColorHex = initialColor;
   setCoreTexture(coreMaterial, shellMaterial, makeColorTexture(initialColor));
   updateDailyBreakCount(getTodayBreakCount());
+  refreshSavedWaxList();
   var lastTime = performance.now();
   var animationFrameId = null;
   function tick() {
