@@ -34544,24 +34544,17 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
   }
   function saveCurrentPhoto() {
     renderer.render(scene, camera);
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        showToast("\uC0AC\uC9C4 \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC5B4\uC694");
-        return;
-      }
-      const now = /* @__PURE__ */ new Date();
-      const pad = (n) => String(n).padStart(2, "0");
-      const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `\uC641\uBFCC_${stamp}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast("\uC0AC\uC9C4\uC73C\uB85C \uC800\uC7A5\uD588\uC5B4\uC694");
-    }, "image/png");
+    const dataUrl = canvas.toDataURL("image/png");
+    const now = /* @__PURE__ */ new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `\uC641\uBFCC_${stamp}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    showToast("\uC0AC\uC9C4\uC73C\uB85C \uC800\uC7A5\uD588\uC5B4\uC694");
   }
   var RANDOM_MATERIAL_MODES = ["clay", "slime", "waxbbu"];
   var { initialColor } = initUI({

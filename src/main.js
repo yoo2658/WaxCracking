@@ -420,34 +420,34 @@ function deleteSavedWaxAndRefresh(id) {
 // 자체를 진짜 이미지 파일로 만들어 기기의 일반 다운로드 경로에 내려받음.
 // scene.js가 WebGLRenderer를 만들 때 preserveDrawingBuffer를 안 켜뒀음(저사양
 // 기기에서 매 프레임 버퍼를 하나 더 유지하는 상시 비용을 늘리고 싶지 않아서) —
-// 그래서 render() 직후 같은 동기 실행 흐름 안에서 바로 canvas.toBlob을 불러야
-// 안전하게 읽힘(브라우저가 버퍼를 지우는 건 이 실행이 끝나고 이벤트 루프로
-// 돌아간 뒤). 렌더 온디맨드 루프(tick())와 별개로 여기서 직접 한 번 더 그리는
-// 이유도 이것 — "지금 이 순간의 화면"을 확실하게 그려두기 위해서.
+// 그래서 render() 직후 같은 동기 실행 흐름 안에서 바로 canvas.toDataURL을
+// 불러야 안전하게 읽힘(브라우저가 버퍼를 지우는 건 이 실행이 끝나고 이벤트
+// 루프로 돌아간 뒤). 렌더 온디맨드 루프(tick())와 별개로 여기서 직접 한 번 더
+// 그리는 이유도 이것 — "지금 이 순간의 화면"을 확실하게 그려두기 위해서.
+//
+// Blob+URL.createObjectURL이 아니라 dataURL을 쓰는 이유: 카카오톡 인앱브라우저
+// (웹뷰 기반이라 원래 파일 다운로드 기능이 없음)가 공식적으로 지원하는 다운로드
+// 방식은 서버 응답 헤더(이 프로젝트는 서버가 없어 해당 없음)/`<a download>`
+// (안드로이드만)/dataURL(iOS 포함) 세 가지뿐이고, Blob 방식은 그 목록에 없어
+// 카카오톡 인앱브라우저에서 실제로 안 됨("카카오톡 브라우저에선 저장하기가 안
+// 통함" — 확인 후 dataURL로 교체). toDataURL은 동기 함수라 콜백도 필요 없어짐.
 function saveCurrentPhoto() {
   renderer.render(scene, camera);
-  canvas.toBlob((blob) => {
-    if (!blob) {
-      showToast('사진 저장에 실패했어요');
-      return;
-    }
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    const url = URL.createObjectURL(blob);
-    // 다운로드 폴더로 바로 저장되는 표준적인 방법 — 서버나 파일시스템 API 없이
-    // <a download>가 브라우저의 일반 다운로드 동작을 그대로 트리거함. 일부
-    // 브라우저는 DOM에 붙어있지 않은 <a>의 click()을 무시할 수 있어 안전하게
-    // 잠깐 붙였다 뗌.
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `왁뿌_${stamp}.png`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast('사진으로 저장했어요');
-  }, 'image/png');
+  const dataUrl = canvas.toDataURL('image/png');
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  // 다운로드 폴더로 바로 저장되는 표준적인 방법 — 서버나 파일시스템 API 없이
+  // <a download>가 브라우저의 일반 다운로드 동작을 그대로 트리거함. 일부
+  // 브라우저는 DOM에 붙어있지 않은 <a>의 click()을 무시할 수 있어 안전하게
+  // 잠깐 붙였다 뗌.
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = `왁뿌_${stamp}.png`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('사진으로 저장했어요');
 }
 
 // "랜덤 왁뿌"(main.js 요청 — 2026-08-11) 대상 3종. 크루아상/waxbbu 조합처럼
