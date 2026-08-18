@@ -384,26 +384,22 @@ html, body {
   color: var(--text-muted);
 }
 
-/* flex-direction이 기본값(row)이라, 이 컨테이너 자신의 높이는 가장 키가 큰
-   자식(#ui 패널, 최대 600px+)에 맞춰 늘어남 — 그런데 아이콘 버튼들(68px)은 그
-   늘어난 높이의 극히 일부만 차지해서, 버튼들 오른쪽/아래의 "비어 보이는" 공간도
-   실제로는 이 div의 히트박스 안이라 캔버스 드래그/클릭을 조용히 먹어버리는
-   버그가 있었음("메뉴를 활성화했을 때 화면의 절반이 드래그가 안 되고 왁스도
-   안 눌림" — elementFromPoint로 직접 확인). 컨테이너 자체는 클릭을 투과시키고
-   (pointer-events: none), 실제로 보이는 자식들만 다시 클릭 가능하게 함. */
-#ui-wrapper {
+/* 저장 목록/사진 캡처/빠른 리셋 — 화면 왼쪽 아래에 독립적으로 떠 있는 버튼
+   묶음("왁뿌 저장하기/캡쳐하기/빠른리셋을 좌측 하단으로 옮겨줘"). 예전엔 이
+   버튼들이 #ui(설정 메뉴)와 같은 오른쪽 위 컨테이너를 나눠 썼는데, 그러다 보니
+   메뉴가 펼쳐지면 그 컨테이너 높이가 메뉴 높이만큼 늘어나 버튼 옆 빈 공간까지
+   클릭을 먹어버리는 버그(39_Do.md)와, 좁은 화면에서 서로 자리를 다투는 버그
+   (40/41_Do.md)가 반복해서 생겼음. 아예 다른 모서리(왼쪽 아래)로 완전히
+   분리하면 #wax-progress(왼쪽 위)/#ui(오른쪽 위) 어느 쪽과도 자리를 두고
+   다툴 일이 없음 — 세 버튼 모두 높이가 68px로 같아서(위 두 버그의 원인이었던
+   "키 큰 자식" 문제 자체가 없음) 별도 pointer-events 트릭도 필요 없음. */
+#quick-actions {
   position: fixed;
-  top: 20px;
-  right: 20px;
+  bottom: 20px;
+  left: 20px;
   display: flex;
-  align-items: flex-start;
   gap: 10px;
-  max-width: calc(100vw - 40px);
-  pointer-events: none;
-}
-
-#ui-wrapper > * {
-  pointer-events: auto;
+  z-index: 5;
 }
 
 #quick-reset-button,
@@ -430,7 +426,13 @@ html, body {
   background: var(--control-bg-hover);
 }
 
+/* 설정 메뉴 — 기존처럼 오른쪽 위에 고정, 펼치면 위에서 아래로 늘어남(원래
+   동작 그대로). #quick-actions가 따로 빠져나가 이제 이 자리를 혼자 쓰므로,
+   좁은 화면에서 다른 요소와 폭을 다툴 일이 없음. */
 #ui {
+  position: fixed;
+  top: 20px;
+  right: 20px;
   width: 260px;
   min-width: 0;
   padding: 18px;
@@ -442,26 +444,30 @@ html, body {
   transition: background 0.2s ease, box-shadow 0.2s ease, width 0.15s ease, padding 0.15s ease, border-radius 0.15s ease;
 }
 
-/* 좁은 화면(휴대폰)에서는 아이콘 버튼 3개(⭐📸↺, flex-shrink:0로 68px 고정) +
-   #ui(260px, min-width:0이라 얼마든지 눌릴 수 있음)가 한 줄에 다 안 들어가면,
-   #ui만 남는 자투리 공간(때에 따라 100px대)까지 짜부라져서 제목 "왁스 뿌수기"가
-   한 글자씩 세로로 줄바꿈되고 종류/왁스종류 버튼들이 패널 밖으로 넘쳐 잘리는
-   문제가 있었음("핸드폰에서 보는 뷰가 완전 찌그러졌잖아" — 실제 기기 스크린샷으로
-   확인). #ui-wrapper 자체에 폭을 못박고 줄바꿈을 허용해서, 펼쳤을 때는 버튼
-   줄 아래 자기 줄로 내려가 전체 폭을 다 쓰게 함 — 접혔을 때(68x68 정사각형)는
-   자리만 있으면 버튼들과 그대로 한 줄에 남음. 내용이 화면보다 길면 패널
-   안에서만 스크롤(요청하신 대로 — "메뉴 안에 스크롤이 들어가도 상관없음"). */
 @media (max-width: 600px) {
-  #ui-wrapper {
-    width: calc(100vw - 40px);
-    flex-wrap: wrap;
-    justify-content: flex-end;
+  /* 내용이 화면보다 길면(짧은 기기) 메뉴 안에서만 스크롤 — "메뉴 안에
+     스크롤이 들어가도 상관없음". 화면이 짧으면 메뉴(오른쪽 위, 260px 너비)의
+     왼쪽 끝이 #quick-actions(왼쪽 아래)의 오른쪽 끝보다 더 안쪽까지 들어올 수
+     있어서(예: 375px 화면), 가로로 안 겹치는 데 기대지 않고 세로로 확실히
+     떼어놓음 — #quick-actions(bottom:20px, 68px 높이) 위로 여유 있게(약 40px)
+     못 미치게 최대 높이를 제한(스크린샷으로 실제 겹침을 확인하고 수정). */
+  #ui:not(.collapsed) {
+    max-height: calc(100vh - 130px);
+    overflow-y: auto;
   }
 
-  #ui:not(.collapsed) {
-    width: 100%;
-    max-height: calc(100vh - 120px);
-    overflow-y: auto;
+  /* 메뉴가 펼쳐졌을 땐 왼쪽 위 "남은 왁스" 표시를 가림("메뉴가 활성화됐을 땐
+     남은 왁스가 가려지게 해줘") — ui.js의 ui-toggle 클릭 핸들러가 body에
+     menu-open 클래스를 같이 토글해줌. */
+  body.menu-open #wax-progress {
+    display: none;
+  }
+
+  /* #quick-actions가 화면 왼쪽 아래(bottom:20px, 68px 높이)로 옮겨오면서,
+     가운데 아래에 뜨는 토스트(짧은 안내 문구)와 겹치는 걸 스크린샷으로
+     확인해서 위로 띄움. */
+  #toast {
+    bottom: 100px;
   }
 }
 

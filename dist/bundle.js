@@ -34099,9 +34099,11 @@ if (vHoleMask > 0.5 && innerCrackVisible > 0.5) discard;
     onVolumeChange(Number(volumeSlider.value) / 100);
     const uiPanel = document.getElementById("ui");
     const uiToggle = document.getElementById("ui-toggle");
+    document.body.classList.toggle("menu-open", !uiPanel.classList.contains("collapsed"));
     uiToggle.addEventListener("click", () => {
       const collapsed = uiPanel.classList.toggle("collapsed");
       uiToggle.textContent = collapsed ? "\u2630" : "\u2715";
+      document.body.classList.toggle("menu-open", !collapsed);
     });
     document.getElementById("completion-close").addEventListener("click", hideCompletionBanner);
     const helpPanel = document.getElementById("help-panel");

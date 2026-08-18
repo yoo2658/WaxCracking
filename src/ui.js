@@ -124,9 +124,15 @@ export function initUI({
   // rest of the screen is free.
   const uiPanel = document.getElementById('ui');
   const uiToggle = document.getElementById('ui-toggle');
+  // body의 menu-open 클래스로 좁은 화면에서 #wax-progress를 가림(style.css) —
+  // "메뉴가 활성화됐을 땐 남은 왁스가 가려지게 해줘". 메뉴는 기본 펼침 상태로
+  // 시작하므로, 클릭 핸들러 등록 시점에 지금 상태를 그대로 한 번 반영해둠
+  // (안 그러면 새로고침 직후엔 메뉴가 펼쳐져 있는데도 남은 왁스가 계속 보임).
+  document.body.classList.toggle('menu-open', !uiPanel.classList.contains('collapsed'));
   uiToggle.addEventListener('click', () => {
     const collapsed = uiPanel.classList.toggle('collapsed');
     uiToggle.textContent = collapsed ? '☰' : '✕';
+    document.body.classList.toggle('menu-open', !collapsed);
   });
 
   // Only this dedicated close button dismisses the completion summary — see
